@@ -4,6 +4,8 @@
 #define MOTOR_TIMER_CHANNEL LEDC_CHANNEL_0
 #define MOTOR_TIMER LEDC_TIMER_0
 
+ESP_EVENT_DEFINE_BASE(MOTOR_EVENTS);
+
 static gpio_num_t pwm_pin = 0, ain1_pin = 0, ain2_pin = 0;
 
 void Motor_Init(gpio_num_t pwm,gpio_num_t ain1, gpio_num_t ain2)

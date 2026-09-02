@@ -26,13 +26,6 @@ void Motor_cb(void* handler_args, esp_event_base_t base, int32_t id, void* event
     ESP_LOGI("APP", "Motor_cb set speed, SpeedLevel = %d, Speed = %d", SpeedLevel, CurSpeed);
 }
 
-ESP_EVENT_DECLARE_BASE(MOTOR_EVENTS);        // declaration of the timer events family
-ESP_EVENT_DEFINE_BASE(MOTOR_EVENTS);
-
-enum {
-    MOTOR_START
-};
-
 void Key_MotorSwitchTask(void* parameter)
 {
     while(1)
