@@ -26,6 +26,12 @@ int Encoder_GetCount(void);
 /* 折算"电机对外输出轴"圈数（定量轮所在轴）：脉冲 ÷ (每输入圈脉冲 × 减速比) = ÷(7×100)=÷700 */
 float Encoder_GetOutputRotCount(void);
 
+/*
+ * 纯换算（不读计数）：把给定的脉冲数换算成"对外输出轴"圈数。
+ * 供调用方使用"自己读到的同一份脉冲快照"，避免多次读数之间计数还在增长导致不一致。
+ */
+float Encoder_CountToOutputRot(int PulseCnt);
+
 /* 计数清零（每作业开始时调用一次，规避 ±10000 上限自动清零的锚定问题） */
 void Encoder_ClearCount(void);
 
@@ -34,5 +40,11 @@ void Encoder_StartCount(void);
 
 /* 停数 + 断电（幂等，重复调用安全） */
 void Encoder_StopCount(void);
+
+/*
+ * [测试专用] 注入假脉冲数：>=0 时 GetCount/GetOutputRotCount 返回该值（模拟卡粮/恢复）；
+ * -1 恢复真实编码器计数。正式版本可删除。
+ */
+void Encoder_TestSetPulse(int Pulse);
 
 #endif

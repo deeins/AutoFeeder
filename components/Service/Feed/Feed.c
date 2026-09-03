@@ -1,6 +1,7 @@
 #include "Feed.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "Motor.h"
 #include "Encoder.h"
 
@@ -26,8 +27,12 @@
 /* 校准常量：每"电机对外输出圈"（定量轮 1 圈）出粮克数——暂定值，用电子秤实测后替换 */
 #define GRAM_PER_OUTPUT_ROT 10
 
+#define RECOVER_INVERSE_TIME_ms 200
+// 复位到逆转前位置，看是否能转过去
+#define RECOVER_TIME_ms RECOVER_INVERSE_TIME_ms + 100
+
 /*
- * 克重换算（服务层内部纯函数）：输出轴圈数（来自编码器 ÷1050，浮点）→ 出粮克重
+ * 克重换算（服务层内部纯函数）：输出轴圈数（来自编码器 ÷700，浮点）→ 出粮克重
  * 结果只供喂食目标判定/日志显示使用，无副作用
  */
 static float Feed_GetTransWeight(float OutputRot)
@@ -49,6 +54,27 @@ static uint8_t s_bFdQueueOwnedImdtSource = 0;   /* 立即喂食标志：已有�
 static FdState_t s_FdState = FEED_ST_READY;     /* 当前状态（初始就绪；NONE 仅作兜底） */
 
 static FdData_t s_FdData;                       /* 当前作业缓存：就绪态取出，运行/收尾期间读取 */
+
+/* 卡粮检测（运行态"该转没转"）：连续 FEED_NOPULSE_TICKS 个 tick 脉冲数不动即判卡。
+ * 进入运行态（作业开始 / 自愈恢复）时由 Feed_ResetPulseMonitor() 复位基线。 */
+static int32_t  s_LastPulse = -1;   /* 上个 tick 的脉冲数；-1 = 未建立基线（本作业第一拍） */
+static uint8_t  s_NoPulseTick = 0;  /* 脉冲数未变化的连续 tick 计数 */
+
+static int64_t s_RecoverStartUs = -1; /* 自愈阶段起始时刻（esp_timer µs，单调墙钟）；-1 = 尚未开始计时 */
+static int32_t s_RecoverLastPulse = -1;   /* 上个 tick 的脉冲数；-1 = 未建立基线（本作业第一拍） */
+
+// 后面值改成枚举，异常恢复标志位，0代表空状态，1代表正在逆转，2代表正在尝试恢复正转
+static uint8_t s_ErrorRecoverFlag = 0;
+
+/* 前向声明：Feed_RunningHandler 先于定义用到，需先声明避免 C23 隐式声明报错 */
+static uint8_t Feed_PulseStalled(int PulseCnt, int32_t* LastPulse);
+
+/* 复位卡粮基线（转移层进入运行态时调用，防止旧值误触发） */
+static void Feed_ResetPulseMonitor(void)
+{
+    s_LastPulse = -1;
+    s_NoPulseTick = 0;
+}
 
 /*
  * FEED_REQUEST 事件回调（esp_event 任务上下文）
@@ -79,26 +105,126 @@ static FdActRes_t Feed_ReadyHandler()
  * TODO(卡粮)：目前只判"转数到达"，缺"N tick 无脉冲（该转没转）"判定——接入后在此数
  *        NoPulseTick 并返回 FD_RES_NO_PULSE；无脉冲窗口的起始参照需在进入运行态时记录。
  */
+/*
+ * 状态动作：运行态（感知层）——每 tick 读编码器脉冲，做两件事：
+ *  ① 卡粮判定：该转没转 = 脉冲数连续 FEED_NOPULSE_TICKS 个 tick 不变 → FD_RES_NO_PULSE；
+ *  ② 到达判定：输出圈数换算克重 ≥ 目标 → FD_RES_TARGET_REACHED。
+ * 电机维持转动不需要这里操心：PWM 一发硬件持续转（转移层进入运行态时启动）。
+ */
 static FdActRes_t Feed_RunningHandler()
 {
-    float OutputRotCnt = Encoder_GetOutputRotCount();   /* 定量轮（输出轴）圈数 */
-    float TransWeight = Feed_GetTransWeight(OutputRotCnt);
+    /* 本 tick 脉冲快照：只读一次，卡粮判定与到达判定共用同一份，避免多次读数间计数器增长导致不一致 */
+    int PulseCnt = Encoder_GetCount();
 
+    /* ① 卡粮"该转没转"：Feed_PulseStalled 返回 1 = 连续 N tick 无脉冲（卡住） */
+    if (Feed_PulseStalled(PulseCnt, &s_LastPulse))
+    {
+        ESP_LOGI(FD_TAG, "Jam detected (no pulse for %d ticks).", s_NoPulseTick);
+        return FD_RES_NO_PULSE;                 /* → 异常态（反转自愈） */
+    }
+
+    /* ② 到达判定：用同一份快照换算输出圈数（注：注入假计数时此值同样走假读数） */
+    float OutputRotCnt = Encoder_CountToOutputRot(PulseCnt);
+    float TransWeight = Feed_GetTransWeight(OutputRotCnt);
     if (TransWeight >= s_FdData.Weight)
     {
         ESP_LOGI(FD_TAG, "Feed done: TransWeight = %.1f g (target %d g), OutputRot = %.3f, PulseCnt = %d.",
-                 TransWeight, s_FdData.Weight, OutputRotCnt, Encoder_GetCount());
+                 TransWeight, s_FdData.Weight, OutputRotCnt, PulseCnt);
         return FD_RES_TARGET_REACHED;
     }
     return FD_RES_IN_PROGRESS;
 }
 
-/* 状态动作：异常态（感知层）——反转自愈推进判定。
- * TODO(占位)：当前直接报告自愈成功（无实际反转逻辑）；接入方向解码后，
- *        反转 PWM 推进属持续输出，而"自愈是否恢复"的判定（该转没转反向）在此感知。 */
+/*
+ * 脉冲"卡住"检测：传入本 tick 快照 PulseCnt 与上次值指针 LastPulse，判断脉冲是否连续不动。
+ * 语义：返回 1 = 卡住（该转没转，连续 FEED_NOPULSE_TICKS 个 tick 无变化）；0 = 正常。
+ * 约定：*LastPulse < 0 表示未建立基线（进入新阶段第一拍），此处建立基线并清零无脉冲计数。
+ */
+static uint8_t Feed_PulseStalled(int PulseCnt, int32_t* LastPulse)
+{
+    if (*LastPulse < 0)
+    {
+        *LastPulse = PulseCnt;
+        s_NoPulseTick = 0;                      /* 新阶段基线：清零，防上一阶段残留误判 */
+    }
+    else if (PulseCnt != *LastPulse)
+    {
+        *LastPulse = PulseCnt;
+        s_NoPulseTick = 0;                      /* 有脉冲：正常，清卡住计数 */
+    }
+    else if (++s_NoPulseTick >= FEED_NOPULSE_TICKS)
+    {
+        return 1;                               /* 连续 N tick 无脉冲 = 卡住 */
+    }
+    return 0;
+}
+
+/*
+ * 状态动作：异常态（感知层）——反转自愈推进判定。两段式：
+ *   flag=0（初次/新会话）→ 置 1 并复位脉冲基线，进入反转阶段；
+ *   flag=1（反转自愈）→ 反转 RECOVER_INVERSE_TIME_ms 后切回正转，进 flag=2；
+ *   flag=2（回正验证）→ 正转 RECOVER_TIME_ms 内脉冲恢复 → RETRY_OK；期间脉冲又卡死 → RETRY_FAIL（重试）。
+ * 计时用 esp_timer 墙钟时间差（s_RecoverStartUs，µs）——Feed_Run 每轮因顶部
+ * xQueueReceive 阻塞 10 tick 且可能被消息提前打断，轮次时长不固定，
+ * 不能用"轮次计数 × tick 周期"换算时间。
+ */
 static FdActRes_t Feed_ErrorHandler()
 {
-    return FD_RES_RETRY_OK;
+    /* 会话开始（含重试后的再次进入）：复位自愈子状态再走反转 */
+    if (s_ErrorRecoverFlag == 0)
+    {
+        s_ErrorRecoverFlag = 1;
+        s_RecoverStartUs = -1;
+        s_RecoverLastPulse = -1;
+    }
+
+    /* 反转阶段 */
+    if (s_ErrorRecoverFlag == 1)
+    {
+        if (s_RecoverStartUs < 0)
+        {
+            s_RecoverStartUs = esp_timer_get_time();
+            Motor_Recover_RunInverse();          /* 会话起点：开始反转 */
+        }
+        else if (esp_timer_get_time() - s_RecoverStartUs >= (int64_t)RECOVER_INVERSE_TIME_ms * 1000)
+        {
+            s_RecoverStartUs = -1;               /* 进入回正阶段：下一拍重新计时 */
+            s_ErrorRecoverFlag = 2;
+            s_RecoverLastPulse = -1;             /* 回正阶段重新建脉冲基线 */
+            Motor_Run();                          /* 反转时间到，切回正转 */
+        }
+    }
+    /* 回正验证阶段 */
+    else if (s_ErrorRecoverFlag == 2)
+    {
+        /* 本 tick 快照：只读一次，卡住判定用同一份 */
+        int PulseCnt = Encoder_GetCount();
+
+        if (Feed_PulseStalled(PulseCnt, &s_RecoverLastPulse))
+        {
+            /* 回正后仍无脉冲 = 自愈失败，重试（转移层计数）；重新走一遍反转 */
+            s_ErrorRecoverFlag = 1;
+            s_RecoverStartUs = -1;
+            s_RecoverLastPulse = -1;
+            return FD_RES_RETRY_FAIL;
+        }
+
+        if (s_RecoverStartUs < 0)
+        {
+            s_RecoverStartUs = esp_timer_get_time();   /* 回正阶段计时起点 */
+        }
+        else if (esp_timer_get_time() - s_RecoverStartUs >= (int64_t)RECOVER_TIME_ms * 1000)
+        {
+            /* 回正后持续有脉冲到验证期结束 = 自愈成功 */
+            s_ErrorRecoverFlag = 0;
+            s_RecoverStartUs = -1;
+            s_RecoverLastPulse = -1;
+            Motor_Stop();
+            return FD_RES_RETRY_OK;
+        }
+    }
+
+    return FD_RES_IN_PROGRESS;
 }
 
 /*
@@ -154,6 +280,7 @@ static FdState_t Feed_StateTransition(const FdActRes_t ActRes)
         Motor_Run();
         Encoder_ClearCount();               /* 新作业计数从 0 起算：不清会拿上次残留瞬间"到达" */
         Encoder_StartCount();
+        Feed_ResetPulseMonitor();           /* 卡粮判定基线清零，避免旧值误触发 */
         FdState = FEED_ST_RUNNING;
     }
     /* 运行态：转数/克重到达 → 结束态（一次性：停电机 + 停计数） */
@@ -164,7 +291,7 @@ static FdState_t Feed_StateTransition(const FdActRes_t ActRes)
         Encoder_StopCount();
         FdState = FEED_ST_END;
     }
-    /* 运行态：该转没转 → 异常态（一次性：先停电机，反转自愈 PWM 交给异常态 Act 持续输出） */
+    /* 运行态：该转没转 → 异常态（一次性：尝试反转自愈） */
     else if (ActRes == FD_RES_NO_PULSE)
     {
         ESP_LOGI(FD_TAG, "Enter FEED_ST_ERROR state.");
@@ -174,9 +301,10 @@ static FdState_t Feed_StateTransition(const FdActRes_t ActRes)
     /* 异常态：自愈成功 → 回运行态续跑（一次性：切回正转；不清计数 = 保留已完成的进度） */
     else if (ActRes == FD_RES_RETRY_OK)
     {
-        ESP_LOGI(FD_TAG, "Enter FEED_ST_RUNNING state.");
+        ESP_LOGI(FD_TAG, "ERROR_RETRY is OK. Enter FEED_ST_RUNNING state.");
         s_RetryCnt = 0;
         Motor_Run();
+        Feed_ResetPulseMonitor();           /* 自愈恢复后重新建立脉冲基线 */
         FdState = FEED_ST_RUNNING;
     }
     /* 异常态：自愈失败 → 未达上限留异常 / 达上限结束收尾（一次性：出异常必停硬件） */
@@ -321,4 +449,10 @@ void Feed_Run(void)
     /* ③④ 状态机：感知动作（非阻塞切片）→ 转移（切换 + 进入新状态的一次性硬件副作用） */
     FdActRes_t ActRes = Feed_SmAct(s_FdState);
     s_FdState = Feed_StateTransition(ActRes);
+}
+
+/* 当前状态机状态（调试/测试用，只读） */
+FdState_t Feed_GetState(void)
+{
+    return s_FdState;
 }

@@ -22,6 +22,8 @@
  */
 
 #define FEED_ERROR_RETRY_TIMES 3    /* 卡粮反转自愈的最大次数 */
+#define FEED_NOPULSE_TICKS    5    /* 运行态：连续 N tick 脉冲数不动 → 判定卡粮（该转没转） */
+#define FEED_NOPULSE_TICKS    5    /* 异常态：连续 N tick 脉冲数自然变化 → 判定恢复 */
 
 ESP_EVENT_DECLARE_BASE(FEED_EVENTS);
 /* 声明放头文件，定义在.c里——若在.h里定义，被多个.c包含会产生多重定义 */
@@ -99,5 +101,8 @@ void Feed_Init(void);
 
 /* 喂食任务单 tick：红外守卫 + 请求决策 + 状态机动作/转移（由周期任务循环调用） */
 void Feed_Run(void);
+
+/* 当前状态机状态（调试/测试用） */
+FdState_t Feed_GetState(void);
 
 #endif

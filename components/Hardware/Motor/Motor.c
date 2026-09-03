@@ -5,6 +5,7 @@
 #define MOTOR_TIMER LEDC_TIMER_0
 
 #define MOTOR_DEFAULT_SPEED 2048
+#define MOTOR_RECOVER_SPEED -2048
 
 static gpio_num_t s_PwmPin = 0, s_Ain1Pin = 0, s_Ain2Pin = 0;
 
@@ -72,6 +73,11 @@ void Motor_SetSpeed(int32_t Speed)
 void Motor_Run(void)
 {
     Motor_SetSpeed(MOTOR_DEFAULT_SPEED);
+}
+
+void Motor_Recover_RunInverse(void)
+{
+    Motor_SetSpeed(MOTOR_RECOVER_SPEED);
 }
 
 void Motor_Stop(void)

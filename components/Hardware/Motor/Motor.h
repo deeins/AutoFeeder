@@ -8,6 +8,8 @@ void Motor_SetSpeed(int32_t Speed);
 
 void Motor_Run(void);
 
+void Motor_Recover_RunInverse(void);
+
 void Motor_Stop(void);
 
 #endif
