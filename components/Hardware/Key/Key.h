@@ -20,7 +20,7 @@
  *
  * @param pin 引脚位掩码，如 BIT(9) | BIT(10)
  */
-void Key_Init(uint64_t pin);
+void Key_Init(uint64_t Pin);
 
 /**
  * 查询当前所有被按下的键。
@@ -35,7 +35,7 @@ uint64_t Key_GetKeyNum(void);
  * @param pin 引脚编号（GPIO 数字，不是位掩码）
  * @return 非 0 表示按下，0 表示未按下
  */
-uint8_t Key_GetKeyPressState(gpio_num_t pin);
+uint8_t Key_GetKeyPressState(gpio_num_t Pin);
 
 /**
  * 按下沿检测：本次调用以来新按下的键，按住期间不重复触发。
@@ -54,6 +54,6 @@ uint64_t Key_GetPressEdge(void);
  *
  * 警告：会阻塞调用任务直到松开，仅在确认型交互使用；普通动作优先 Key_GetPressEdge()。
  */
-uint8_t Key_WaitRelease(gpio_num_t pin);
+uint8_t Key_WaitRelease(gpio_num_t Pin);
 
 #endif

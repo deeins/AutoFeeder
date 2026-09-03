@@ -20,10 +20,10 @@
 #include "freertos/FreeRTOS.h"
 
 /** 已注册按键的位掩码（第 n 位为 1 表示 GPIO n 是按键） */
-static uint64_t s_pin = 0;
+static uint64_t s_Pin = 0;
 
 /** 上一次调用 Key_GetKeyNum 的按位快照，边沿检测依赖它判断"新按下" */
-static uint64_t s_last_mask = 0;
+static uint64_t s_LastMask = 0;
 
 /** 按键状态：未按下 / 正在按下 / 已松开 */
 enum Key_State
@@ -36,23 +36,23 @@ enum Key_State
 /**
  * 注册按键引脚（可多次调用，内部按位或累加）。
  *
- * @param pin 按键引脚位掩码，如 BIT(9) | BIT(10)
+ * @param Pin 按键引脚位掩码，如 BIT(9) | BIT(10)
  *
  * 配置为：输入模式、内部上拉（空闲高电平）、不使能中断（轮询式）。
  * 注意：若按键按下接 3.3V（与 GND 接法相反），需把 pull_up/pull_down 对调，
  * 并把"低电平=按下"的判断改成"高电平=按下"。
  */
-void Key_Init(uint64_t pin)
+void Key_Init(uint64_t Pin)
 {
-    s_pin |= pin;
-    const gpio_config_t cfg = {
+    s_Pin |= Pin;
+    const gpio_config_t Cfg = {
         .intr_type = GPIO_INTR_DISABLE,
         .mode = GPIO_MODE_INPUT,
-        .pin_bit_mask = pin,
+        .pin_bit_mask = Pin,
         .pull_up_en = GPIO_PULLUP_ENABLE,       // 上拉 + 低电平=按下，对应按键一端接 GND
         .pull_down_en = GPIO_PULLDOWN_DISABLE
     };
-    gpio_config(&cfg);
+    gpio_config(&Cfg);
 }
 
 /**
@@ -60,7 +60,7 @@ void Key_Init(uint64_t pin)
  *
  * @return 位掩码：第 n 位为 1 表示 GPIO n 正被按下，0 表示没有任何键按下
  *
- * 只遍历已注册的引脚（跳过 s_pin 之外的位），避免读取悬空/未配置引脚。
+ * 只遍历已注册的引脚（跳过 s_Pin 之外的位），避免读取悬空/未配置引脚。
  * 返回的是"当前时刻"的快照，连续调用且按键未动时结果相同；
  * 若需要"只在按下瞬间触发一次"，用 Key_GetPressEdge()。
  */
@@ -71,7 +71,7 @@ uint64_t Key_GetKeyNum(void)
     for (uint8_t i = 0; i < GPIO_NUM_MAX; ++i)
     {
         uint64_t CurBit = BIT(i);
-        if (!(CurBit & s_pin))
+        if (!(CurBit & s_Pin))
         {
             continue;
         }
@@ -86,13 +86,13 @@ uint64_t Key_GetKeyNum(void)
 /**
  * 查询单个引脚当前是否按下（低电平 = 按下）。
  *
- * @param pin 引脚编号（GPIO 数字，不是位掩码）
+ * @param Pin 引脚编号（GPIO 数字，不是位掩码）
  * @return KEY_PRESSING(1) 表示按下，NONE(0) 表示未按下
  */
-uint8_t Key_GetKeyPressState(gpio_num_t pin)
+uint8_t Key_GetKeyPressState(gpio_num_t Pin)
 {
     uint8_t PressState = NONE;
-    if (!gpio_get_level(pin))
+    if (!gpio_get_level(Pin))
     {
         PressState = KEY_PRESSING;
     }
@@ -113,15 +113,15 @@ uint8_t Key_GetKeyPressState(gpio_num_t pin)
 uint64_t Key_GetPressEdge(void)
 {
     uint64_t Now = Key_GetKeyNum();
-    uint64_t Edge = Now & ~s_last_mask;
-    s_last_mask = Now;
+    uint64_t Edge = Now & ~s_LastMask;
+    s_LastMask = Now;
     return Edge;
 }
 
 /**
  * 阻塞等待指定按键松开（确认型交互用，如"按住确认、松开才执行"）。
  *
- * @param pin 引脚编号（GPIO 数字，不是位掩码）
+ * @param Pin 引脚编号（GPIO 数字，不是位掩码）
  * @return KEY_RELEASE(2) 表示检测到按下并已松开；调用时未按下直接返回 NONE(0)
  *
  * 注意：
@@ -131,13 +131,13 @@ uint64_t Key_GetPressEdge(void)
  *   3. 推荐用 Key_GetPressEdge() 代替本函数做"一次性动作"，本函数仅用于
  *      必须等松手的交互（如长按取消）。
  */
-uint8_t Key_WaitRelease(gpio_num_t pin)
+uint8_t Key_WaitRelease(gpio_num_t Pin)
 {
-    if (gpio_get_level(pin))
+    if (gpio_get_level(Pin))
     {
         return NONE;
     }
-    while (gpio_get_level(pin))
+    while (gpio_get_level(Pin))
     {
         vTaskDelay(10 / portTICK_PERIOD_MS);
     }
