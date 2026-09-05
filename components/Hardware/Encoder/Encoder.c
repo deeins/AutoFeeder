@@ -100,8 +100,13 @@ int Encoder_GetCount(void)
  */
 float Encoder_CountToOutputRot(int PulseCnt)
 {
-    // 一个周期有两次计数，同时此处不关心正转反转的进度，只输出一个数值
-    return abs(PulseCnt) / (float)(PULSE_CNT_PER_MOTOR_ROUND * MOTOR_GEAR_RATIO) / 2;
+    return PulseCnt / (float)(PULSE_CNT_PER_MOTOR_ROUND * MOTOR_GEAR_RATIO) / 2;
+}
+
+/* 量化脉冲变化角度，正向旋转为正角度 */
+float Encoder_GetDeltaAngle(int TargetPulse, int StartPulse)
+{
+    return Encoder_CountToOutputRot(TargetPulse - StartPulse) * 360;
 }
 
 /* 便捷版本：用当前计数值换算（若调用方已持有快照，建议用 CountToOutputRot 复用，避免二次读数） */

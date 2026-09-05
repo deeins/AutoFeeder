@@ -1,7 +1,6 @@
 #include "Feed.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "Motor.h"
 #include "Encoder.h"
 
@@ -15,7 +14,7 @@
  *  - 守卫打断：红外消息（堵粮）由 Feed_Run 顶部带超时接收，是唯一"动作外"转移路径
  *
  * 三层职责划分（写代码前对照，防错位）：
- *  - 感知层（Feed_ReadyHandler / RunningHandler / ErrorHandler / EndHandler）：
+ *  - 感知层（Feed_ReadyHandler / RunningHandler / EndHandler）：
  *    每 tick 幂等查询/判断，只返回结果码。查询式动作可重复执行，绝不产生硬件副作用。
  *  - 转移层（Feed_StateTransition）：
  *    ① 纯映射：结果码 → 下一状态（含重试计数 s_RetryCnt）；
@@ -27,9 +26,10 @@
 /* 校准常量：每"电机对外输出圈"（定量轮 1 圈）出粮克数——暂定值，用电子秤实测后替换 */
 #define GRAM_PER_OUTPUT_ROT 10
 
-#define RECOVER_INVERSE_TIME_ms 200
-// 复位到逆转前位置，看是否能转过去
-#define RECOVER_TIME_ms RECOVER_INVERSE_TIME_ms + 100
+// 异常_反转自愈状态反转的角度，角度制，以运行态进异常时的脉冲作为锚点
+#define RECOVER_REVERSE_ANGLE -10
+// 复位后继续转动多少度，以运行态进异常时的脉冲作为锚点
+#define RECOVER_ANGLE 5
 
 /*
  * 克重换算（服务层内部纯函数）：输出轴圈数（来自编码器 ÷700，浮点）→ 出粮克重
@@ -60,11 +60,7 @@ static FdData_t s_FdData;                       /* 当前作业缓存：就绪�
 static int32_t  s_LastPulse = -1;   /* 上个 tick 的脉冲数；-1 = 未建立基线（本作业第一拍） */
 static uint8_t  s_NoPulseTick = 0;  /* 脉冲数未变化的连续 tick 计数 */
 
-static int64_t s_RecoverStartUs = -1; /* 自愈阶段起始时刻（esp_timer µs，单调墙钟）；-1 = 尚未开始计时 */
 static int32_t s_RecoverLastPulse = -1;   /* 上个 tick 的脉冲数；-1 = 未建立基线（本作业第一拍） */
-
-// 后面值改成枚举，异常恢复标志位，0代表空状态，1代表正在逆转，2代表正在尝试恢复正转
-static uint8_t s_ErrorRecoverFlag = 0;
 
 /* 前向声明：Feed_RunningHandler 先于定义用到，需先声明避免 C23 隐式声明报错 */
 static uint8_t Feed_PulseStalled(int PulseCnt, int32_t* LastPulse);
@@ -99,12 +95,6 @@ static FdActRes_t Feed_ReadyHandler()
     return FD_RES_JOB_NONE;
 }
 
-/*
- * 状态动作：运行态（感知层）——每 tick 读编码器圈数换算克重，到达目标即报告到达。
- * 电机维持转动不需要这里操心：PWM 一发硬件持续转（转移层进入运行态时启动）。
- * TODO(卡粮)：目前只判"转数到达"，缺"N tick 无脉冲（该转没转）"判定——接入后在此数
- *        NoPulseTick 并返回 FD_RES_NO_PULSE；无脉冲窗口的起始参照需在进入运行态时记录。
- */
 /*
  * 状态动作：运行态（感知层）——每 tick 读编码器脉冲，做两件事：
  *  ① 卡粮判定：该转没转 = 脉冲数连续 FEED_NOPULSE_TICKS 个 tick 不变 → FD_RES_NO_PULSE；
@@ -159,71 +149,41 @@ static uint8_t Feed_PulseStalled(int PulseCnt, int32_t* LastPulse)
     return 0;
 }
 
-/*
- * 状态动作：异常态（感知层）——反转自愈推进判定。两段式：
- *   flag=0（初次/新会话）→ 置 1 并复位脉冲基线，进入反转阶段；
- *   flag=1（反转自愈）→ 反转 RECOVER_INVERSE_TIME_ms 后切回正转，进 flag=2；
- *   flag=2（回正验证）→ 正转 RECOVER_TIME_ms 内脉冲恢复 → RETRY_OK；期间脉冲又卡死 → RETRY_FAIL（重试）。
- * 计时用 esp_timer 墙钟时间差（s_RecoverStartUs，µs）——Feed_Run 每轮因顶部
- * xQueueReceive 阻塞 10 tick 且可能被消息提前打断，轮次时长不固定，
- * 不能用"轮次计数 × tick 周期"换算时间。
- */
-static FdActRes_t Feed_ErrorHandler()
+static FdActRes_t Feed_ErrorReverseHandler()
 {
-    /* 会话开始（含重试后的再次进入）：复位自愈子状态再走反转 */
-    if (s_ErrorRecoverFlag == 0)
-    {
-        s_ErrorRecoverFlag = 1;
-        s_RecoverStartUs = -1;
-        s_RecoverLastPulse = -1;
-    }
-
     /* 反转阶段 */
-    if (s_ErrorRecoverFlag == 1)
+    /* 本 tick 快照：只读一次，卡住判定用同一份 */
+    int PulseCnt = Encoder_GetCount();
+
+    if (Feed_PulseStalled(PulseCnt, &s_RecoverLastPulse))
     {
-        if (s_RecoverStartUs < 0)
-        {
-            s_RecoverStartUs = esp_timer_get_time();
-            Motor_Recover_RunInverse();          /* 会话起点：开始反转 */
-        }
-        else if (esp_timer_get_time() - s_RecoverStartUs >= (int64_t)RECOVER_INVERSE_TIME_ms * 1000)
-        {
-            s_RecoverStartUs = -1;               /* 进入回正阶段：下一拍重新计时 */
-            s_ErrorRecoverFlag = 2;
-            s_RecoverLastPulse = -1;             /* 回正阶段重新建脉冲基线 */
-            Motor_Run();                          /* 反转时间到，切回正转 */
-        }
+        /* 反转过程卡住，尝试正转 */
+        return FD_RES_REVERSE_STALLED;
     }
-    /* 回正验证阶段 */
-    else if (s_ErrorRecoverFlag == 2)
+        
+    if (Encoder_GetDeltaAngle(PulseCnt, s_LastPulse) <= RECOVER_REVERSE_ANGLE)
     {
-        /* 本 tick 快照：只读一次，卡住判定用同一份 */
-        int PulseCnt = Encoder_GetCount();
+        return FD_RES_REVERSE_DONE;
+    }
+    return FD_RES_IN_PROGRESS;
+}
 
-        if (Feed_PulseStalled(PulseCnt, &s_RecoverLastPulse))
-        {
-            /* 回正后仍无脉冲 = 自愈失败，重试（转移层计数）；重新走一遍反转 */
-            s_ErrorRecoverFlag = 1;
-            s_RecoverStartUs = -1;
-            s_RecoverLastPulse = -1;
-            return FD_RES_RETRY_FAIL;
-        }
+static FdActRes_t Feed_ErrorForwardHandler()
+{
+    /* 本 tick 快照：只读一次，卡住判定用同一份 */
+    int PulseCnt = Encoder_GetCount();
 
-        if (s_RecoverStartUs < 0)
-        {
-            s_RecoverStartUs = esp_timer_get_time();   /* 回正阶段计时起点 */
-        }
-        else if (esp_timer_get_time() - s_RecoverStartUs >= (int64_t)RECOVER_TIME_ms * 1000)
-        {
-            /* 回正后持续有脉冲到验证期结束 = 自愈成功 */
-            s_ErrorRecoverFlag = 0;
-            s_RecoverStartUs = -1;
-            s_RecoverLastPulse = -1;
-            Motor_Stop();
-            return FD_RES_RETRY_OK;
-        }
+    if (Feed_PulseStalled(PulseCnt, &s_RecoverLastPulse))
+    {
+        /* 回正后仍无脉冲 = 自愈失败，重试（转移层计数）；重新走一遍反转 */
+        return FD_RES_RETRY_FAIL;
     }
 
+    if (Encoder_GetDeltaAngle(PulseCnt, s_LastPulse) >= RECOVER_ANGLE)
+    {
+        /* 复位并正常运行一段距离 = 自愈成功 */
+        return FD_RES_RETRY_OK;
+    }
     return FD_RES_IN_PROGRESS;
 }
 
@@ -248,10 +208,29 @@ static void Feed_IR_RunningBlockHandler()
     
 }
 
-/* 红外守卫动作：异常态（自愈中）收到堵粮消息时调用（当前占位；出餐口堵→中止自愈直接失败收尾） */
-static void Feed_IR_ErrorBlockHandler()
+static void Feed_EnterRunningSt(void)
 {
+    Motor_Run();
+    Feed_ResetPulseMonitor();           /* 卡粮判定基线清零，避免旧值误触发 */
+}
 
+static void Feed_EnterErrReverseSt(void)
+{
+    // 清自愈脉冲基线 + 启动反转
+    s_RecoverLastPulse = -1;
+    Motor_Recover_RunInverse();          /* 开始反转 */
+}
+
+static void Feed_EnterEndSt(void)
+{
+    Motor_Stop();
+    Encoder_StopCount();
+}
+
+static void Feed_EnterErrForwardSt(void)
+{
+    s_RecoverLastPulse = -1;             /* 回正阶段重新建脉冲基线 */
+    Motor_Run();                          /* 反转时间到，切回正转 */
 }
 
 /*
@@ -262,8 +241,8 @@ static void Feed_IR_ErrorBlockHandler()
  *    只在切换发生的那一次执行（沿触发，与感知层每 tick 轮询互补），禁止放持续控制。
  * 自检清单（每个分支都要对上 mermaid 出边）：
  *    进 RUNNING（来自 READY/ERROR）→ 电机开/计数清+开；
- *    进 ERROR / 进 END（来自 RUNNING/ERROR）→ 电机停/计数停；
- *    漏一个分支 = 硬件没人管。当前占位分支用 TODO 标明，禁止带病合并。
+ *    进 ERROR（来自 RUNNING/ERROR）→ 电机反转；
+ *    进 END（来自 RUNNING/ERROR）→ 电机停/计数停；
  */
 static FdState_t Feed_StateTransition(const FdActRes_t ActRes)
 {
@@ -277,48 +256,73 @@ static FdState_t Feed_StateTransition(const FdActRes_t ActRes)
     else if (ActRes == FD_RES_JOB_TAKEN)
     {
         ESP_LOGI(FD_TAG, "Enter FEED_ST_RUNNING state.");
-        Motor_Run();
         Encoder_ClearCount();               /* 新作业计数从 0 起算：不清会拿上次残留瞬间"到达" */
         Encoder_StartCount();
-        Feed_ResetPulseMonitor();           /* 卡粮判定基线清零，避免旧值误触发 */
+
+        Feed_EnterRunningSt();
+
+        ESP_ERROR_CHECK(esp_event_post(FEED_EVENTS, FEED_START, &s_FdData, sizeof(s_FdData), 0));
+
         FdState = FEED_ST_RUNNING;
     }
     /* 运行态：转数/克重到达 → 结束态（一次性：停电机 + 停计数） */
     else if (ActRes == FD_RES_TARGET_REACHED)
     {
         ESP_LOGI(FD_TAG, "Enter FEED_ST_END state.");
-        Motor_Stop();
-        Encoder_StopCount();
+        Feed_EnterEndSt();
         FdState = FEED_ST_END;
     }
     /* 运行态：该转没转 → 异常态（一次性：尝试反转自愈） */
     else if (ActRes == FD_RES_NO_PULSE)
     {
-        ESP_LOGI(FD_TAG, "Enter FEED_ST_ERROR state.");
-        Motor_Stop();
-        FdState = FEED_ST_ERROR;
+        ESP_LOGI(FD_TAG, "Enter FEED_ST_ERROR_REVERSE state.");
+
+        Feed_EnterErrReverseSt();
+
+        FdMsgData_t FdMsgData = {
+            .FdData = s_FdData,
+            .Msg = "Enter FEED_ST_ERROR_REVERSE state."
+        };
+        ESP_ERROR_CHECK(esp_event_post(FEED_EVENTS, FEED_BLOCK, &FdMsgData, sizeof(FdMsgData), 0));
+
+        FdState = FEED_ST_ERROR_REVERSE;
     }
     /* 异常态：自愈成功 → 回运行态续跑（一次性：切回正转；不清计数 = 保留已完成的进度） */
     else if (ActRes == FD_RES_RETRY_OK)
     {
         ESP_LOGI(FD_TAG, "ERROR_RETRY is OK. Enter FEED_ST_RUNNING state.");
         s_RetryCnt = 0;
-        Motor_Run();
-        Feed_ResetPulseMonitor();           /* 自愈恢复后重新建立脉冲基线 */
+        s_RecoverLastPulse = -1;
+
+        Feed_EnterRunningSt();
+
+        ESP_ERROR_CHECK(esp_event_post(FEED_EVENTS, FEED_RECOVER, &s_FdData, sizeof(s_FdData), 0));
+
         FdState = FEED_ST_RUNNING;
     }
     /* 异常态：自愈失败 → 未达上限留异常 / 达上限结束收尾（一次性：出异常必停硬件） */
     else if (ActRes == FD_RES_RETRY_FAIL)
     {
         s_RetryCnt++;
+        s_RecoverLastPulse = -1;
         if (s_RetryCnt >= FEED_ERROR_RETRY_TIMES)
         {
             ESP_LOGI(FD_TAG, "RetryCnt reach FEED_ERROR_RETRY_TIMES.");
             s_RetryCnt = 0;
-            Motor_Stop();
-            Encoder_StopCount();
+            Feed_EnterEndSt();
             FdState = FEED_ST_END;
         }
+        else
+        {
+            Feed_EnterErrReverseSt();
+            FdState = FEED_ST_ERROR_REVERSE;
+        }
+    }
+    /* 异常态：反转到位 / 自愈时阻塞 → 进入正转验证 */
+    else if (ActRes == FD_RES_REVERSE_DONE || ActRes == FD_RES_REVERSE_STALLED)
+    {
+        Feed_EnterErrForwardSt();
+        FdState = FEED_ST_ERROR_FORWARD;
     }
     /* 结束态：收尾完成 → 回就绪（一次性收尾副作用见 Feed_EndHandler 注释） */
     else if (ActRes == FD_RES_DONE)
@@ -326,6 +330,9 @@ static FdState_t Feed_StateTransition(const FdActRes_t ActRes)
         ESP_LOGI(FD_TAG, "Enter FEED_ST_READY state.");
         // 结束阶段清理一次计数
         Encoder_ClearCount();
+        
+        ESP_ERROR_CHECK(esp_event_post(FEED_EVENTS, FEED_END, &s_FdData, sizeof(s_FdData), 0));
+
         FdState = FEED_ST_READY;
     }
     return FdState;
@@ -349,8 +356,11 @@ static FdActRes_t Feed_SmAct(const FdState_t FdState)
     case FEED_ST_RUNNING:
         FdActRes = Feed_RunningHandler();
         break;
-    case FEED_ST_ERROR:
-        FdActRes = Feed_ErrorHandler();
+    case FEED_ST_ERROR_REVERSE:
+        FdActRes = Feed_ErrorReverseHandler();
+        break;
+    case FEED_ST_ERROR_FORWARD:
+        FdActRes = Feed_ErrorForwardHandler();
         break;
     case FEED_ST_END:
         FdActRes = Feed_EndHandler();
@@ -363,7 +373,7 @@ static FdActRes_t Feed_SmAct(const FdState_t FdState)
 
 /*
  * 红外堵粮消息的守卫响应（喂食任务上下文，由 Feed_Run 收到消息后调用）
- * 按当前状态分派：运行→按消息类型转异常/结束；异常→按类型计数或中止自愈；
+ * 按当前状态分派：运行→按消息类型转异常/结束；异常两态/就绪/结束 → 忽略消费（异常期不响应红外）；
  * 就绪/结束→不该有消息（残留），忽略（消费掉防污染下个作业）
  */
 static void Feed_OnBlockage(const IR_Data_t* pIRData)
@@ -374,12 +384,10 @@ static void Feed_OnBlockage(const IR_Data_t* pIRData)
         ESP_LOGI(FD_TAG, "Handle FEED_ST_RUNNING state.");
         Feed_IR_RunningBlockHandler();
         break;
-    case FEED_ST_ERROR:
-        ESP_LOGI(FD_TAG, "Handle FEED_ST_ERROR state.");
-        Feed_IR_ErrorBlockHandler();
+    case FEED_ST_NONE:
+        ESP_LOGI(FD_TAG, "ERROR: Block in Unexpected FdState!");
         break;
     default:
-        ESP_LOGI(FD_TAG, "ERROR: Block in Unexpected FdState!");
         break;
     }
 }

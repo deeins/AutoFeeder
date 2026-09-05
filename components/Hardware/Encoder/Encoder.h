@@ -32,6 +32,8 @@ float Encoder_GetOutputRotCount(void);
  */
 float Encoder_CountToOutputRot(int PulseCnt);
 
+float Encoder_GetDeltaAngle(int TargetPulse, int CurPulse);
+
 /* 计数清零（每作业开始时调用一次，规避 ±10000 上限自动清零的锚定问题） */
 void Encoder_ClearCount(void);
 

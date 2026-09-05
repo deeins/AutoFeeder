@@ -23,7 +23,6 @@
 
 #define FEED_ERROR_RETRY_TIMES 3    /* 卡粮反转自愈的最大次数 */
 #define FEED_NOPULSE_TICKS    5    /* 运行态：连续 N tick 脉冲数不动 → 判定卡粮（该转没转） */
-#define FEED_NOPULSE_TICKS    5    /* 异常态：连续 N tick 脉冲数自然变化 → 判定恢复 */
 
 ESP_EVENT_DECLARE_BASE(FEED_EVENTS);
 /* 声明放头文件，定义在.c里——若在.h里定义，被多个.c包含会产生多重定义 */
@@ -35,6 +34,8 @@ enum {
     FEED_START,         /* 喂食开始事件：喂食服务 → 外部订阅者 */
     FEED_END,           /* 喂食结束事件：喂食服务 → 外部订阅者 */
     FEED_BLOCK,         /* 喂食阻塞事件：喂食服务 → 外部订阅者 */
+    FEED_CLEAR_BLOCK,   /* 喂食清堵确认事件：外部订阅者 → 喂食服务 */
+    FEED_RECOVER,       /* 喂食阻塞解决事件：喂食服务 → 外部订阅者 */
 };
 
 /* 喂食类型：如实标记请求的触发性质（供日志/订阅方区分），不因内部逻辑失真 */
@@ -76,7 +77,8 @@ typedef enum {
     FEED_ST_NONE = 0,       /* 无效态（兜底用，正常运行不落在此态） */
     FEED_ST_READY,          /* 就绪：等作业（取作业队列） */
     FEED_ST_RUNNING,        /* 运行：电机转圈推进中 */
-    FEED_ST_ERROR,          /* 异常：卡粮反转自愈中 */
+    FEED_ST_ERROR_REVERSE,  /* 异常_反转自愈：卡粮反转自愈中 */
+    FEED_ST_ERROR_FORWARD,  /* 异常_正转验证：卡粮反转自愈中 */
     FEED_ST_END             /* 结束：收尾（清立即标志/失败置闸门/预约续期/发事件） */
 } FdState_t;
 
@@ -93,6 +95,8 @@ typedef enum {
     FD_RES_NO_PULSE,          /* 运行：N tick 无脉冲（该转没转）→ 异常 */
     FD_RES_RETRY_OK,          /* 异常：反转自愈恢复 → 运行 */
     FD_RES_RETRY_FAIL,        /* 异常：自愈失败（重试计数在转移层）→ 未达上限留异常/达上限结束 */
+    FD_RES_REVERSE_DONE,      /* 异常：反转到位→切正转验证 */
+    FD_RES_REVERSE_STALLED,   /* 异常：反转卡住→试正转（失败计入正转验证） */
     FD_RES_DONE               /* 结束：收尾完成 → 就绪 */
 } FdActRes_t;
 
