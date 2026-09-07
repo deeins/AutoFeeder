@@ -144,3 +144,21 @@ uint8_t Key_WaitRelease(gpio_num_t Pin)
     vTaskDelay(100 / portTICK_PERIOD_MS);
     return KEY_RELEASE;
 }
+
+void Key_SingleClickCheck(gpio_num_t Pin, void CallBack(void))
+{
+    if (Key_GetKeyPressState(Pin))
+    {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        if (Key_GetKeyPressState(Pin))
+        {
+            CallBack();
+        }
+        while (Key_GetKeyPressState(Pin))
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+}

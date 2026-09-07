@@ -64,7 +64,7 @@ typedef struct {
 /* 喂食结果/通知载荷（拒绝、阻塞等带文本信息的事件） */
 typedef struct {
     FdData_t FdData;         /* 原始请求信息（回灌用） */
-    char*    Msg;            /* 提示文本；esp_event 深拷贝只拷指针不拷字符串，须传静态/字面量 */
+    const char*    Msg;      /* 提示文本；esp_event 深拷贝只拷指针不拷字符串，须传静态/字面量 */
 } FdMsgData_t;
 
 /* 红外消息：红外驱动模块未写，先占位（0=卡粮 1=出餐口堵）；模块成型后移到驱动侧头文件 */

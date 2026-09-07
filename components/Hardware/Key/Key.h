@@ -56,4 +56,20 @@ uint64_t Key_GetPressEdge(void);
  */
 uint8_t Key_WaitRelease(gpio_num_t Pin);
 
+/**
+ * 单击检测（便捷封装）：轮询式检测单键「按下 → 消抖确认 → 触发回调 → 等待松开」。
+ *
+ * 在按键任务中周期调用，结构：
+ *   1. 检测到按下 → vTaskDelay(20ms) 消抖 → 二次确认仍按下才触发回调（沿触发，按住不重复）；
+ *   2. 回调返回后阻塞等待松开（10ms 轮询）；
+ *   3. 每轮末尾 vTaskDelay(10ms) 兜底轮询节奏（同时兼作松手抖动窗口）。
+ *
+ * @param Pin      引脚编号（GPIO 数字）
+ * @param CallBack 消抖确认后调用的回调函数（执行于调用任务上下文，须短促非阻塞）
+ *
+ * 语义注意：回调在「松开前」触发（按下沿 + 消抖确认），不是「完整单击后」触发；
+ * 将来若需区分单击/长按或松开才执行，此封装不适用，需另行扩展。
+ */
+void Key_SingleClickCheck(gpio_num_t Pin, void CallBack(void));
+
 #endif

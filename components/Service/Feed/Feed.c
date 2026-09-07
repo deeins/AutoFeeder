@@ -27,9 +27,9 @@
 #define GRAM_PER_OUTPUT_ROT 10
 
 // 异常_反转自愈状态反转的角度，角度制，以运行态进异常时的脉冲作为锚点
-#define RECOVER_REVERSE_ANGLE -10
+#define RECOVER_REVERSE_ANGLE -36 // 1 / 10
 // 复位后继续转动多少度，以运行态进异常时的脉冲作为锚点
-#define RECOVER_ANGLE 5
+#define RECOVER_ANGLE 12 // 1 / 30
 
 /*
  * 克重换算（服务层内部纯函数）：输出轴圈数（来自编码器 ÷700，浮点）→ 出粮克重
@@ -392,6 +392,14 @@ static void Feed_OnBlockage(const IR_Data_t* pIRData)
     }
 }
 
+static void Feed_RunTask(void* Parameter)
+{
+    while (1)
+    {
+        Feed_Run();
+    }
+}
+
 /* 创建全部队列并注册事件订阅。队列长度=5、按载荷字节数创建（队列存值拷贝）。 */
 void Feed_Init(void)
 {
@@ -400,6 +408,8 @@ void Feed_Init(void)
     s_IRQueue = xQueueCreate(5, sizeof(IR_Data_t));
     assert(s_FdQueue && s_FdReqQueue && s_IRQueue);
     ESP_ERROR_CHECK(esp_event_handler_register(FEED_EVENTS, FEED_REQUEST, Feed_RequestHandler, NULL));
+
+    xTaskCreate(Feed_RunTask, "Feed_RunTask", 8192, NULL, 1, NULL);
 }
 
 /*

@@ -1,9 +1,6 @@
 #include "Encoder.h"
 #include "driver/pulse_cnt.h"
 
-/* ===== 测试注入开关：模拟编码器读数（正式版把下面宏置 0 即恢复真实计数）===== */
-#define ENCODER_TEST_INJECT 1
-
 #define PULSE_CNT_PER_MOTOR_ROUND 7    /* 编码器所在轴每转脉冲数（商家参数：电机输入侧/最小齿轮） */
 #define MOTOR_GEAR_RATIO            100 /* 减速比：输入侧转 100 圈 = 对外输出轴（定量轮）1 圈 */
 
@@ -11,10 +8,6 @@ static gpio_num_t s_Pin1;             /* A 相：计数脉冲 */
 static gpio_num_t s_Pin2;             /* B 相：判向预留（90° 正交，已接线，未启用） */
 
 static bool s_Counting = false;       /* 模块内计数状态：Start/Stop 幂等开关的唯一状态源 */
-
-#if ENCODER_TEST_INJECT
-static int s_TestPulse = -1;          /* >=0 时用假脉冲数替代真实计数；-1 = 真实编码器 */
-#endif
 
 static pcnt_unit_handle_t    g_Unit;  /* 模块内句柄：Init 创建后供本文件所有函数使用 */
 static pcnt_channel_handle_t g_Chan;
@@ -71,23 +64,9 @@ void Encoder_Init(gpio_num_t Pin1, gpio_num_t Pin2)
         PCNT_CHANNEL_LEVEL_ACTION_INVERSE));  /* B 低：加减互换（反向） */
 }
 
-/* 测试注入：设置假脉冲数（>=0 生效，-1 恢复真实计数）。ENCODER_TEST_INJECT=0 时为空操作。 */
-void Encoder_TestSetPulse(int Pulse)
-{
-#if ENCODER_TEST_INJECT
-    s_TestPulse = Pulse;
-#endif
-}
-
-/* 当前累计脉冲数（未开判向时为正值计数；测试注入开启时返回假读数） */
+/* 当前累计脉冲数（未开判向时为正值计数） */
 int Encoder_GetCount(void)
 {
-#if ENCODER_TEST_INJECT
-    if (s_TestPulse >= 0)
-    {
-        return s_TestPulse;
-    }
-#endif
     int Count = 0;
     ESP_ERROR_CHECK(pcnt_unit_get_count(g_Unit, &Count));
     return Count;

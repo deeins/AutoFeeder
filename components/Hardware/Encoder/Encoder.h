@@ -43,10 +43,4 @@ void Encoder_StartCount(void);
 /* 停数 + 断电（幂等，重复调用安全） */
 void Encoder_StopCount(void);
 
-/*
- * [测试专用] 注入假脉冲数：>=0 时 GetCount/GetOutputRotCount 返回该值（模拟卡粮/恢复）；
- * -1 恢复真实编码器计数。正式版本可删除。
- */
-void Encoder_TestSetPulse(int Pulse);
-
 #endif
