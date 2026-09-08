@@ -1,2 +1,10 @@
 CompileFlags:
     Remove: [-f*, -m*]
+    Add:
+        # esp-clangd 安装缺 lib/clang/21 内建头，stddef.h/stdarg.h 等从 gcc 私头目录补
+        - "-isystem"
+        - "C:/Espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/lib/gcc/xtensa-esp-elf/15.2.0/include"
+# 屏蔽 Include Cleaner 对 freertos/* 的“未直接使用/缺失”误报
+Diagnostics:
+    Includes:
+        IgnoreHeader: "freertos/.*"
