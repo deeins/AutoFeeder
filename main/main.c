@@ -59,7 +59,6 @@ void app_main(void)
     Key_Init(BIT(MOTOR_SWITCH) | BIT(DEBUG_MODE_SWITCH));
     Motor_Init(GPIO_NUM_10, GPIO_NUM_11, GPIO_NUM_12);
     Encoder_Init(GPIO_NUM_16, GPIO_NUM_17);
-    DS3231_Init();
 
     Feed_Init();
 

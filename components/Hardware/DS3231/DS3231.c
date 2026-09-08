@@ -115,16 +115,7 @@ esp_err_t DS3231_Init(void)
     I2C_DeviceRegister(DS3231_DEVICE_ADDR, &s_I2C_DS3231_DevHandler);
 
     uint8_t StatusReg = 0;
-    DS_ERR_CHECK(DS3231_ReadReg(STATUS_REG_ADDR, &StatusReg, 1))
-    if (StatusReg & (1 << OSF_BIT))
-    {
-        ESP_LOGI(DS3231_TAG, "Init: OSF is 1. Time is invalid. Please check the error.");
-        s_OSF = 1;
-    }
-    else
-    {
-        s_OSF = 0;
-    }
+    DS_ERR_CHECK(DS3231_Probe(&StatusReg))
 
     /* 写回 0Fh：清 EN32kHz(bit3) 省电；A1F/A2F(bit0/1) 写 0 清除防残留；OSF 只读不受影响 */
     StatusReg &= ~((1 << EN32KHZ_BIT) | (1 << A1IE_BIT) | (1 << A2IE_BIT));
@@ -141,6 +132,21 @@ esp_err_t DS3231_Init(void)
     DS_ERR_CHECK(DS3231_WriteReg(CTRL_REG_ADDR, CtrlReg))
 
     return  ESP_OK;
+}
+
+esp_err_t DS3231_Probe(uint8_t* StatusReg)
+{
+    DS_ERR_CHECK(DS3231_ReadReg(STATUS_REG_ADDR, StatusReg, 1))
+    if ((*StatusReg) & (1 << OSF_BIT))
+    {
+        ESP_LOGI(DS3231_TAG, "Init: OSF is 1. Time is invalid. Please check the error.");
+        s_OSF = 1;
+    }
+    else
+    {
+        s_OSF = 0;
+    }
+    return ESP_OK;
 }
 
 esp_err_t DS3231_GetTime(struct tm* Time)

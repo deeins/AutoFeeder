@@ -9,6 +9,8 @@
 
 esp_err_t DS3231_Init();
 
+esp_err_t DS3231_Probe(uint8_t* StatusReg);
+
 esp_err_t DS3231_GetTime(struct tm* Time);
 
 esp_err_t DS3231_SetTime(const struct tm* Time);
