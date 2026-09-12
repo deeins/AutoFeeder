@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <time.h>
+#include "esp_event_base.h"
 #include "esp_log.h"
 
 #include "freertos/FreeRTOS.h"
@@ -19,7 +21,7 @@
 #define DS3231_SDA GPIO_NUM_21
 #define DS3231_SCL GPIO_NUM_47
 
-FEED_SOURCE_DEFINE(FD_IMMEDIATE_TEST);
+ESP_EVENT_DEFINE_BASE(FD_IMMEDIATE_TEST);
 
 // 暂时放在main里，严格来讲这是外部对喂食模块的请求，
 // 后面可以出一个按键服务模块，以及和手机应用对接的网络模块，这两个模块发起喂食请求
@@ -61,6 +63,15 @@ void app_main(void)
     Encoder_Init(GPIO_NUM_16, GPIO_NUM_17);
 
     Feed_Init();
+
+    DS3231_Init();
+
+    struct tm tm_time;
+    DS3231_GetTime(&tm_time);
+
+    char buf[64];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_time);
+    ESP_LOGI("APP", "Time = %s", buf);
 
     xTaskCreate(Key_MotorSwitchTask, "Key_MotorSwitch", 2048, NULL, 1, NULL);
     xTaskCreate(Key_DebugModeSwitchTask, "Key_DebugModeSwitchTask", 2048, NULL, 1, NULL);

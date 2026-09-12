@@ -1,6 +1,7 @@
 #ifndef __FEED_H
 #define __FEED_H
 #include "esp_event.h"
+#include "esp_event_base.h"
 
 /*
  * 喂食服务（服务层）—— 定时/手动喂食的执行核心
@@ -44,20 +45,10 @@ typedef enum {
     FEED_TYPE_IMMEDIATE     /* 立即：按键/App 手动喂食 */
 } FeedType_t;
 
-/*
- * 事件来源：字符串常量符号（同 esp_event base 机制）
- *  - 各来源模块自己 DEFINE/DECLARE，互不引用对方符号，链接器防重名
- *  - 比较用 ==（指针比较同一 extern 符号），不要 strcmp
- *  - 例：app.c 里 FEED_SOURCE_DEFINE(FEED_SRC_APP);  发请求时 .Source = FEED_SRC_APP
- */
-typedef const char* FeedSource_t;
-#define FEED_SOURCE_DEFINE(id) FeedSource_t const id = #id     /* 放各来源模块 .c（全工程唯一） */
-#define FEED_SOURCE_DECLARE(id) extern FeedSource_t const id   /* 放各来源模块 .h */
-
 /* 喂食请求/作业载荷 */
 typedef struct {
     FeedType_t   Type;       /* 预约 / 立即 */
-    FeedSource_t Source;     /* 发起者符号（拒绝/结果回灌时定位发起方） */
+    esp_event_base_t Source;     /* 发起者符号（拒绝/结果回灌时定位发起方） */
     uint8_t      Weight;     /* 克重 */
 } FdData_t;
 

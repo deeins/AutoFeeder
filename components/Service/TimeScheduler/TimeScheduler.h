@@ -2,9 +2,11 @@
 #define __TIME_SCHEDULER_H
 #include "esp_event_base.h"
 
-#define TS_PAYLOAD_MAX 10
+#define TS_PAYLOAD_MAX 20
 #define TS_CANCEL_MAX 10
 #define TS_QUEUE_REQUEST_MAX 20
+// 设为1的大小，单槽，后来的永远覆盖先到的，因为时间连续有记忆
+#define TS_QUEUE_TIMER_MAX 1
 
 ESP_EVENT_DECLARE_BASE(TIME_EVENTS);
 
@@ -28,7 +30,7 @@ typedef struct {               /* TIME_REGISTER：调度规格 */
     TsReqHead_t Head;
     uint32_t    Handle;        /* 预约身份句柄：发起方生成（广播模型无回执），同句柄再登记 = 覆盖更新；
                                 * 循环条目 re-arm 沿用原句柄（App 才能撤循环预约） */
-    uint32_t    DueLocalEpoch; /* 下次触发时刻（**本地墙钟** epoch，非 UTC）。本地时刻 epoch 之间差值
+    uint64_t    DueLocalEpoch; /* 下次触发时刻（**本地墙钟** epoch，非 UTC）。本地时刻 epoch 之间差值
                                 * 与 86400s 周期运算与时区无关；调度域全链路本地基准，见决策 8 */
     bool        Periodic;      /* 一次性 / 循环 */
     uint32_t    PeriodSec;     /* 循环周期（无 DST 时 86400s 后推天然正确） */
@@ -50,7 +52,7 @@ typedef struct {               /* TIME_CANCEL：句柄列表批量取消 */
 
 typedef struct {               /* TIME_CALIBRATE：校时（新时间 = **本地墙钟** epoch，全链路唯一跨基准转换点在发送侧，见决策 8） */
     TsReqHead_t Head;
-    uint32_t    Epoch;         /* 本地时刻 epoch（墙钟语义）。来源：SNTP 同步（网络模块：UTC epoch + NVS
+    uint64_t    Epoch;         /* 本地时刻 epoch（墙钟语义）。来源：SNTP 同步（网络模块：UTC epoch + NVS
                                 * 时区偏移后发出，Source=NET）/ 出厂校准（Source=FACTORY，首次上电/生产写
                                 * 基准时间清 OSF）/ App/OLED 手动（Source 各定）。误差 ≤1s（与驱动 ±1~2s 接受区间一致） */
 } TsCalibrateData_t;
@@ -80,7 +82,7 @@ typedef enum {
     TS_ST_INIT,
     TS_ST_RUN,
     TS_ST_PAUSE_TIME,
-    TS_ST_PAUSR_I2C,
+    TS_ST_PAUSE_I2C,
 } TsState_t;
 
 typedef enum {
@@ -96,6 +98,6 @@ typedef enum {
 
 void TS_Init(void);
 
-void TS_RunTask(void);
+void TS_RunTask(void* Parameter);
 
 #endif
