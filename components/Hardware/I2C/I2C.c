@@ -7,7 +7,7 @@
 #include <string.h>
 
 #define CONFIG_SCL_SPEED_HZ         400000
-#define I2C_MASTER_TIMEOUT_MS       1000
+#define I2C_MASTER_TIMEOUT_MS       20     /* 正常事务 <1ms（400kHz），20ms 给足调度抖动裕量；故障快速返回不阻塞任务（2026-09-12 由 1000ms 下调） */
 #define I2C_WRITE_BUF_MAX_LEN       16     /* 单次写事务数据上限（寄存器块写场景 ≤16） */
 
 static i2c_master_bus_handle_t s_I2C_BusHandle = NULL;

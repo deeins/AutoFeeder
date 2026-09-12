@@ -5,6 +5,7 @@
 #include "esp_event.h"
 #include "esp_event_base.h"
 #include "esp_log.h"
+#include "esp_private/log_timestamp.h"
 #include "esp_timer.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
@@ -152,6 +153,7 @@ static void TS_HandleRegisterData(TsRegisterData_t* Data, struct tm *cur_tm)
     if (Data->Periodic && Data->PeriodSec == 0)
     {
         TS_RejectPost(Data, "RegisterData is periodic but PeriodSec is zero.");
+        ESP_LOGI(TsTag, "%s, PeriodSec = %d", Data->Head.Source, Data->PeriodSec);
         return;
     }
 
@@ -162,7 +164,7 @@ static void TS_HandleRegisterData(TsRegisterData_t* Data, struct tm *cur_tm)
     }
 
     // 添加前先验证是否过期
-    time_t cur_epoch = mktime(cur_tm);
+    time_t cur_epoch = timegm(cur_tm);
     if (cur_epoch > Data->DueLocalEpoch)
     {
         TS_RejectPost(Data, "Epoch of register data is expired.");
@@ -237,7 +239,7 @@ static TsActRes_t TS_RunHandler(void)
             // 恢复会自动处理过期信息，此处不需要额外处理，虽然是直接删
             return TS_RES_I2C_FAIL;
         }
-        uint64_t cur_epoch = mktime(&temp_tm);
+        uint64_t cur_epoch = timegm(&temp_tm);
         TS_HandleExpiredData(cur_epoch, TS_ExpiredPolicy);
         TS_RearmTimer(cur_epoch);
     }
@@ -265,7 +267,7 @@ static TsActRes_t TS_RunHandler(void)
         {
             return TS_RES_I2C_FAIL;
         }
-        TS_HandleCancelData(&EvtItem.Data.Cancel, mktime(&cur_tm), true);
+        TS_HandleCancelData(&EvtItem.Data.Cancel, timegm(&cur_tm), true);
         break;
     case TIME_CALIBRATE:
         if (TS_HandleCalibrateData(&EvtItem.Data.Calibrate) != ESP_OK)
@@ -362,7 +364,7 @@ static void TS_HandlePauseExpiredData(TsState_t* State, const char* ErrorActResN
     struct tm temp_tm;
     if (DS3231_GetTime(&temp_tm) == ESP_OK)
     {
-        uint64_t cur_epoch = mktime(&temp_tm);
+        uint64_t cur_epoch = timegm(&temp_tm);
         TS_HandleExpiredData(cur_epoch, TS_MissedPolicy);
         TS_RearmTimer(cur_epoch);
         *State = TS_ST_RUN;
@@ -372,7 +374,7 @@ static void TS_HandlePauseExpiredData(TsState_t* State, const char* ErrorActResN
         char* Msg = "Fail to create I2C connection when running state transition.";
         ESP_LOGI(TsTag, "%s",Msg);
         ESP_LOGI(TsTag, "ActRes = %s", ErrorActResName);
-        esp_event_post(TIME_EVENTS, TIME_CONNECT_FAIL, Msg, strlen(Msg), 0);
+        esp_event_post(TIME_EVENTS, TIME_CONNECT_FAIL, Msg, strlen(Msg) + 1, 0);
         *State = TS_ST_PAUSE_I2C;
     }
 }
@@ -391,21 +393,21 @@ static TsState_t TS_StateTransition(TsActRes_t ActRes)
         {
             char* Msg = "Fail to create I2C connection when init.";
             ESP_LOGI(TsTag, "%s", Msg);
-            esp_event_post(TIME_EVENTS, TIME_CONNECT_FAIL, Msg, strlen(Msg), 0);
+            esp_event_post(TIME_EVENTS, TIME_CONNECT_FAIL, Msg, strlen(Msg) + 1, 0);
         }
     }
     else if (ActRes == TS_RES_TIME_INVALID)
     {
         char* Msg = "Time is invalid. Please adjust the time.";
         ESP_LOGI(TsTag, "%s", Msg);
-        esp_event_post(TIME_EVENTS, TIME_INVALID, Msg, strlen(Msg), 0);
+        esp_event_post(TIME_EVENTS, TIME_INVALID, Msg, strlen(Msg) + 1, 0);
         State = TS_ST_PAUSE_TIME;
     }
     else if (ActRes == TS_RES_TIME_VALID)
     {
         char* Msg = "Time is valid.";
         ESP_LOGI(TsTag, "%s", Msg);
-        esp_event_post(TIME_EVENTS, TIME_VALID, Msg, strlen(Msg), 0);
+        esp_event_post(TIME_EVENTS, TIME_VALID, Msg, strlen(Msg) + 1, 0);
         if (s_State != TS_ST_INIT)
         {
             TS_HandlePauseExpiredData(&State, "TS_RES_TIME_VALID");
@@ -419,14 +421,14 @@ static TsState_t TS_StateTransition(TsActRes_t ActRes)
     {
         char* Msg = "Fail to create I2C connection.";
         ESP_LOGI(TsTag, "%s", Msg);
-        esp_event_post(TIME_EVENTS, TIME_CONNECT_FAIL, Msg, strlen(Msg), 0);
+        esp_event_post(TIME_EVENTS, TIME_CONNECT_FAIL, Msg, strlen(Msg) + 1, 0);
         State = TS_ST_PAUSE_I2C;
     }
     else if (ActRes == TS_RES_I2C_OK)
     {
         char* Msg = "I2C connection is OK.";
         ESP_LOGI(TsTag, "%s", Msg);
-        esp_event_post(TIME_EVENTS, TIME_CONNECT_OK, Msg, strlen(Msg), 0);
+        esp_event_post(TIME_EVENTS, TIME_CONNECT_OK, Msg, strlen(Msg) + 1, 0);
         TS_HandlePauseExpiredData(&State, "TS_RES_I2C_OK");
     }
 
@@ -460,13 +462,26 @@ static void TS_SendReq(void* pHandlerArgs, esp_event_base_t Base, int32_t Id, vo
     switch (Id)
     {
     case TIME_REGISTER:
-        memcpy(&Item.Data.Register, pEventData, sizeof(TsRegisterData_t));
+        memcpy(&Item.Data.Register, &(((TsEvtItem_t*)pEventData)->Data.Register), sizeof(TsRegisterData_t));
+        time_t Due = (time_t)Item.Data.Register.DueLocalEpoch;
+        struct tm DueTm;
+        gmtime_r(&Due, &DueTm);
+        char TimeStr[24];
+        strftime(TimeStr, sizeof(TimeStr), "%Y-%m-%d %H:%M:%S", &DueTm);
+        ESP_LOGI(TsTag, "Register: %s, PeriodSec = %d. It will post on %s.", Item.Data.Register.Head.Source, Item.Data.Register.PeriodSec, TimeStr);
         break;
     case TIME_CANCEL:
-        memcpy(&Item.Data.Cancel, pEventData, sizeof(TsCancelData_t));
+        memcpy(&Item.Data.Cancel, &(((TsEvtItem_t*)pEventData)->Data.Cancel), sizeof(TsCancelData_t));
+        ESP_LOGI(TsTag, "Cancel: %s, CancelNum = %d", Item.Data.Cancel.Head.Source, Item.Data.Cancel.Count);
         break;
     case TIME_CALIBRATE:
-        memcpy(&Item.Data.Calibrate, pEventData, sizeof(TsCalibrateData_t));
+        memcpy(&Item.Data.Calibrate, &(((TsEvtItem_t*)pEventData)->Data.Calibrate), sizeof(TsCalibrateData_t));
+        time_t Due2 = (time_t)Item.Data.Calibrate.Epoch;
+        struct tm DueTm2;
+        gmtime_r(&Due2, &DueTm2);
+        char TimeStr2[24];
+        strftime(TimeStr2, sizeof(TimeStr2), "%Y-%m-%d %H:%M:%S", &DueTm2);
+        ESP_LOGI(TsTag, "Calibrate: %s, Epoch = %llu. It will post on %s.", Item.Data.Calibrate.Head.Source, Item.Data.Calibrate.Epoch, TimeStr2);
         break;
     default:
         return;
