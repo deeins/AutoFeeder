@@ -281,7 +281,7 @@ static FdState_t Feed_StateTransition(const FdActRes_t ActRes)
 
         FdMsgData_t FdMsgData = {
             .FdData = s_FdData,
-            .Msg = "Enter FEED_ST_ERROR_REVERSE state."
+            .Msg = "出粮口堵塞"
         };
         ESP_ERROR_CHECK(esp_event_post(FEED_EVENTS, FEED_BLOCK, &FdMsgData, sizeof(FdMsgData), 0));
 
@@ -430,7 +430,7 @@ void Feed_HandleRequest(FdData_t* pFdData)
         ESP_LOGI(FD_TAG, "Reject: There is immediate feed source.");
         FdMsgData_t FdMsgData = {
             .FdData = *pFdData,
-            .Msg = "Reject: There is immediate feed source."
+            .Msg = "已有喂食任务"
         };
         ESP_ERROR_CHECK(esp_event_post(FEED_EVENTS, FEED_REJECT, &FdMsgData, sizeof(FdMsgData), 0));
         return;

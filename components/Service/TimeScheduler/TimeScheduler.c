@@ -145,21 +145,21 @@ static void TS_HandleRegisterData(TsRegisterData_t* Data, struct tm *cur_tm)
 {
     if (Data == NULL)
     {
-        const char* Msg = "Register data is NULL.";
+        const char* Msg = "登记数据为空";
         ESP_LOGI(TsTag, "%s", Msg);
         return;
     }
 
     if (Data->Periodic && Data->PeriodSec == 0)
     {
-        TS_RejectPost(Data, "RegisterData is periodic but PeriodSec is zero.");
+        TS_RejectPost(Data, "周期参数无效");
         ESP_LOGI(TsTag, "%s, PeriodSec = %d", Data->Head.Source, Data->PeriodSec);
         return;
     }
 
     if (Data->PayloadLen > TS_PAYLOAD_MAX)
     {
-        TS_RejectPost(Data, "PayloadLen is larger than TS_PAYLOAD_MAX.");
+        TS_RejectPost(Data, "载荷超限");
         return;
     }
 
@@ -167,7 +167,7 @@ static void TS_HandleRegisterData(TsRegisterData_t* Data, struct tm *cur_tm)
     time_t cur_epoch = timegm(cur_tm);
     if (cur_epoch > Data->DueLocalEpoch)
     {
-        TS_RejectPost(Data, "Epoch of register data is expired.");
+        TS_RejectPost(Data, "预约时间已过");
         return;
     }
 
@@ -177,7 +177,7 @@ static void TS_HandleRegisterData(TsRegisterData_t* Data, struct tm *cur_tm)
 
     if (!TS_HEAP_Push(Data))
     {
-        TS_RejectPost(Data, "Fail to push data to heap.");
+        TS_RejectPost(Data, "预约已满");
         return;
     }
 
@@ -188,7 +188,7 @@ static void TS_HandleCancelData(TsCancelData_t* Data, uint64_t cur_epoch, bool R
 {
     if (Data == NULL || Data->Count > TS_CANCEL_MAX)
     {
-        const char* Msg = "Cancel data is invalid.";
+        const char* Msg = "取消数据无效";
         ESP_LOGI(TsTag, "%s", Msg);
         if (Data != NULL)
         {
@@ -203,7 +203,7 @@ static void TS_HandleCancelData(TsCancelData_t* Data, uint64_t cur_epoch, bool R
     }
     else if (!TS_HEAP_RemoveByHandles(Data->Head.Source, Data->Handles, Data->Count))
     {
-        TS_PostReject(Data->Head.Source, 0, "No handle is removed.");
+        TS_PostReject(Data->Head.Source, 0, "未找到预约");
         return;
     }
 
@@ -218,7 +218,7 @@ static esp_err_t TS_HandleCalibrateData(TsCalibrateData_t* Data)
 {
     if (Data == NULL)
     {
-        const char* Msg = "Calibrate data is NULL.";
+        const char* Msg = "校时数据为空";
         ESP_LOGI(TsTag, "%s", Msg);
         return ESP_ERR_INVALID_ARG;
     }
@@ -307,7 +307,7 @@ static TsActRes_t TS_PauseTimeHandler(void)
             TS_HandleCancelData(&EvtItem.Data.Cancel, 0, false);
             break;
         case TIME_REGISTER:
-            TS_RejectPost(&EvtItem.Data.Register, "Time is invalid, register is rejected.");
+            TS_RejectPost(&EvtItem.Data.Register, "时间无效，登记被拒");
             break;
         default:
             break;
@@ -371,7 +371,7 @@ static void TS_HandlePauseExpiredData(TsState_t* State, const char* ErrorActResN
     }
     else
     {
-        char* Msg = "Fail to create I2C connection when running state transition.";
+        char* Msg = "通信故障";
         ESP_LOGI(TsTag, "%s",Msg);
         ESP_LOGI(TsTag, "ActRes = %s", ErrorActResName);
         esp_event_post(TIME_EVENTS, TIME_CONNECT_FAIL, Msg, strlen(Msg) + 1, 0);
@@ -391,21 +391,21 @@ static TsState_t TS_StateTransition(TsActRes_t ActRes)
     {
         if (s_LastRes != TS_RES_INIT_I2C_FAIL)
         {
-            char* Msg = "Fail to create I2C connection when init.";
+            char* Msg = "通信故障";
             ESP_LOGI(TsTag, "%s", Msg);
             esp_event_post(TIME_EVENTS, TIME_CONNECT_FAIL, Msg, strlen(Msg) + 1, 0);
         }
     }
     else if (ActRes == TS_RES_TIME_INVALID)
     {
-        char* Msg = "Time is invalid. Please adjust the time.";
+        char* Msg = "时间无效";
         ESP_LOGI(TsTag, "%s", Msg);
         esp_event_post(TIME_EVENTS, TIME_INVALID, Msg, strlen(Msg) + 1, 0);
         State = TS_ST_PAUSE_TIME;
     }
     else if (ActRes == TS_RES_TIME_VALID)
     {
-        char* Msg = "Time is valid.";
+        char* Msg = "时间有效";
         ESP_LOGI(TsTag, "%s", Msg);
         esp_event_post(TIME_EVENTS, TIME_VALID, Msg, strlen(Msg) + 1, 0);
         if (s_State != TS_ST_INIT)
@@ -419,14 +419,14 @@ static TsState_t TS_StateTransition(TsActRes_t ActRes)
     }
     else if (ActRes == TS_RES_I2C_FAIL)
     {
-        char* Msg = "Fail to create I2C connection.";
+        char* Msg = "通信故障";
         ESP_LOGI(TsTag, "%s", Msg);
         esp_event_post(TIME_EVENTS, TIME_CONNECT_FAIL, Msg, strlen(Msg) + 1, 0);
         State = TS_ST_PAUSE_I2C;
     }
     else if (ActRes == TS_RES_I2C_OK)
     {
-        char* Msg = "I2C connection is OK.";
+        char* Msg = "通信正常";
         ESP_LOGI(TsTag, "%s", Msg);
         esp_event_post(TIME_EVENTS, TIME_CONNECT_OK, Msg, strlen(Msg) + 1, 0);
         TS_HandlePauseExpiredData(&State, "TS_RES_I2C_OK");

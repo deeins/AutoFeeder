@@ -62,3 +62,9 @@ esp_err_t I2C_RegisterWrite(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr
 
     return i2c_master_transmit(dev_handle, write_buf, 1 + len, I2C_MASTER_TIMEOUT_MS);
 }
+
+/* 流式器件整帧写（如 SSD1306：无寄存器地址概念，帧首自带控制字节），caller 负责组帧 */
+esp_err_t I2C_DeviceWriteRaw(i2c_master_dev_handle_t dev_handle, const uint8_t *Data, size_t Len)
+{
+    return i2c_master_transmit(dev_handle, Data, Len, I2C_MASTER_TIMEOUT_MS);
+}

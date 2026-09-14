@@ -12,6 +12,7 @@
 #include "TS_Heap.h"
 #include "Encoder.h"
 #include "Debug.h"
+#include "Display.h"
 #include "I2C.h"
 #include "soc/gpio_num.h"
 #include <stdint.h>
@@ -216,6 +217,48 @@ static void TS_TestPostTask(void* Parameter)
     vTaskDelete(NULL);
 }
 
+/* 显示模块联调脚手架：30s 起（等 TS 测试的真实事件跑完）按序注入事件验证槽切换/动画/故障/清槽 */
+static void Display_TestPostTask(void* Parameter)
+{
+    vTaskDelay(pdMS_TO_TICKS(30000));
+
+    FdData_t FdData = {
+        .Type = FEED_TYPE_IMMEDIATE,
+        .Source = FD_IMMEDIATE_TEST,
+        .Weight = 30,
+    };
+    ESP_LOGI("APP", "Display test: FEED_START");
+    esp_event_post(FEED_EVENTS, FEED_START, &FdData, sizeof(FdData), 0);
+
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    FdMsgData_t FdMsgData = {
+        .FdData = FdData,
+        .Msg = "出粮口堵塞",
+    };
+    ESP_LOGI("APP", "Display test: FEED_BLOCK");
+    esp_event_post(FEED_EVENTS, FEED_BLOCK, &FdMsgData, sizeof(FdMsgData), 0);
+
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    ESP_LOGI("APP", "Display test: FEED_RECOVER");
+    esp_event_post(FEED_EVENTS, FEED_RECOVER, &FdData, sizeof(FdData), 0);
+
+    vTaskDelay(pdMS_TO_TICKS(4000));
+    ESP_LOGI("APP", "Display test: FEED_END");
+    esp_event_post(FEED_EVENTS, FEED_END, &FdData, sizeof(FdData), 0);
+
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    const char InvalidMsg[] = "时间无效";
+    ESP_LOGI("APP", "Display test: TIME_INVALID");
+    esp_event_post(TIME_EVENTS, TIME_INVALID, (void*)InvalidMsg, sizeof(InvalidMsg), 0);
+
+    vTaskDelay(pdMS_TO_TICKS(4000));
+    const char ValidMsg[] = "时间有效";
+    ESP_LOGI("APP", "Display test: TIME_VALID");
+    esp_event_post(TIME_EVENTS, TIME_VALID, (void*)ValidMsg, sizeof(ValidMsg), 0);
+
+    vTaskDelete(NULL);
+}
+
 static void TS_TestEventHandler(void* pHandlerArgs, esp_event_base_t Base, int32_t Id, void* pEventData)
 {
     if (Id == TIME_REJECT && pEventData != NULL)
@@ -229,11 +272,35 @@ static void TS_TestEventHandler(void* pHandlerArgs, esp_event_base_t Base, int32
     }
 }
 
+static void TS_StackProbeTask(void* Parameter)
+{
+    vTaskDelay(pdMS_TO_TICKS(10000));
+    TaskHandle_t TsTask = xTaskGetHandle("TS_RunTask");
+    if (TsTask != NULL)
+    {
+        ESP_LOGI("APP", "TS_RunTask stack HWM = %u words (%u bytes)",
+                 (unsigned)uxTaskGetStackHighWaterMark(TsTask),
+                 (unsigned)uxTaskGetStackHighWaterMark(TsTask) * sizeof(StackType_t));
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(22000));
+    if (TsTask != NULL)
+    {
+        ESP_LOGI("APP", "TS_RunTask stack HWM (final) = %u words (%u bytes)",
+                 (unsigned)uxTaskGetStackHighWaterMark(TsTask),
+                 (unsigned)uxTaskGetStackHighWaterMark(TsTask) * sizeof(StackType_t));
+    }
+    vTaskDelete(NULL);
+}
+
 void app_main(void)
 {
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     I2C_BusInit(DS3231_SCL, DS3231_SDA);
+
+    /* 早于 Feed/TS 初始化：先订阅，才能收到 TS 初始化阶段发出的 TIME_INVALID/VALID */
+    Display_Init();
 
     Key_Init(BIT(MOTOR_SWITCH) | BIT(DEBUG_MODE_SWITCH));
     Motor_Init(GPIO_NUM_10, GPIO_NUM_11, GPIO_NUM_12);
@@ -248,6 +315,8 @@ void app_main(void)
     esp_event_handler_register(TIME_EVENTS, ESP_EVENT_ANY_ID, TS_TestEventHandler, NULL);
 
     xTaskCreate(TS_TestPostTask, "TS_TestPostTask", 2048, NULL, 1, NULL);
+    xTaskCreate(TS_StackProbeTask, "TS_StackProbe", 2048, NULL, 1, NULL);
+    xTaskCreate(Display_TestPostTask, "Display_Test", 2048, NULL, 1, NULL);
     xTaskCreate(Key_MotorSwitchTask, "Key_MotorSwitch", 2048, NULL, 1, NULL);
     xTaskCreate(Key_DebugModeSwitchTask, "Key_DebugModeSwitchTask", 2048, NULL, 1, NULL);
 }
