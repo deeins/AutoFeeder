@@ -14,7 +14,11 @@
 #include "Debug.h"
 #include "Display.h"
 #include "I2C.h"
+#include "NetworkInit.h"
 #include "soc/gpio_num.h"
+#include "nvs_flash.h"
+#include "esp_err.h"
+#include "esp_log.h"
 #include <stdint.h>
 
 #define MOTOR_SWITCH GPIO_NUM_9
@@ -23,6 +27,8 @@
 #define DS3231_SCL GPIO_NUM_47
 
 ESP_EVENT_DEFINE_BASE(FD_IMMEDIATE_TEST);
+
+static const char* TAG = "Main";
 
 // 暂时放在main里，严格来讲这是外部对喂食模块的请求，
 // 后面可以出一个按键服务模块，以及和手机应用对接的网络模块，这两个模块发起喂食请求
@@ -297,6 +303,15 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_LOGW(TAG, "nvs init: %s -> erase & retry", esp_err_to_name(err));
+        ESP_ERROR_CHECK(nvs_flash_erase());   /* 整区擦除，所有命名空间一起没（此时数据已不可用） */
+        err = nvs_flash_init();               /* typo：nvs_flash_init() */
+    }
+    ESP_ERROR_CHECK(err);
+
     I2C_BusInit(DS3231_SCL, DS3231_SDA);
 
     /* 早于 Feed/TS 初始化：先订阅，才能收到 TS 初始化阶段发出的 TIME_INVALID/VALID */
@@ -311,6 +326,8 @@ void app_main(void)
     TS_Heap_SelfTest();
 
     TS_Init();
+
+    NetworkInit();
 
     esp_event_handler_register(TIME_EVENTS, ESP_EVENT_ANY_ID, TS_TestEventHandler, NULL);
 

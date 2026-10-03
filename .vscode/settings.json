@@ -19,7 +19,7 @@
       "inheritDefault": "hidden"
     }
   },
-  "clangd.path": "C:\\Espressif\\tools\\esp-clangd\\esp-21.1.3_20260408\\esp-clangd\\bin\\clangd.exe",
+  // "clangd.path": "C:\\Espressif\\tools\\esp-clangd\\esp-21.1.3_20260408\\esp-clangd\\bin\\clangd.exe",
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
@@ -32,6 +32,7 @@
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
-  "idf.portWin": "COM9",
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "deepseekTranslate.systemPrompt": "你是代码注释翻译引擎，把输入内容翻译成 {to}，只输出译文，不解释、不加代码围栏。\n输入是嵌入式 C/C++ 代码注释，请用简洁、专业的技术中文，术语保持统一。",
+  "idf.port": "COM9"
 }
