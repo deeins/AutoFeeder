@@ -1,4 +1,4 @@
-#include "esp_event_base.h"
+﻿#include "esp_event_base.h"
 #include "esp_log.h"
 
 #include "freertos/FreeRTOS.h"
@@ -14,7 +14,7 @@
 #include "Debug.h"
 #include "Display.h"
 #include "I2C.h"
-#include "NetworkInit.h"
+#include "NetInit.h"
 #include "soc/gpio_num.h"
 #include "nvs_flash.h"
 #include "esp_err.h"
@@ -327,7 +327,7 @@ void app_main(void)
 
     TS_Init();
 
-    NetworkInit();
+    Network_Init();
 
     esp_event_handler_register(TIME_EVENTS, ESP_EVENT_ANY_ID, TS_TestEventHandler, NULL);
 

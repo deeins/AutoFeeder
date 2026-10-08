@@ -3,6 +3,7 @@
 #include "esp_event.h"
 #include "esp_event_base.h"
 #include "esp_log.h"
+#include "esp_netif_ip_addr.h"
 #include "esp_netif_types.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
@@ -24,6 +25,9 @@
 #define BACKOFF_SERIES_LEN  (sizeof(s_BackoffSeries) / sizeof(s_BackoffSeries[0]))
 
 const char* TAG = "WIFI";
+
+/* NVS 里存的是 WifiCred_t 裸 blob：布局一变，旧数据会被当新格式读 → 编译期拦住 */
+_Static_assert(sizeof(WifiCred_t) == 98, "WifiCred_t layout changed: NVS blob needs migration");
 
 ESP_EVENT_DEFINE_BASE(MYWIFI_EVENTS);
 
@@ -294,6 +298,10 @@ static WifiState_t Wifi_StateTransition(WifiActRes_t Res, const WifiCtrl_t *Ctrl
         memset(&cfg.sta.password, 0, sizeof(cfg.sta.password));
         memcpy(&cfg.sta.ssid, Cred.SSID, Cred.SSID_len);
         memcpy(&cfg.sta.password, Cred.Pass, Cred.Pass_len);
+        /* 安全策略随凭据形状推导：空口令 ⇒ 这是开放网，threshold 必须放宽到 OPEN，
+           否则驱动会因"AP 的安全等级低于 threshold"直接判 211 (NO_AP_FOUND_IN_AUTHMODE_THRESHOLD)，
+           导致开放网永远连不上（实测见《实现留档.md》2026-10-03）。 */
+        cfg.sta.threshold.authmode = (Cred.Pass_len == 0) ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
         // set前需要确保未连接，不然会报错
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_config(WIFI_IF_STA, &cfg));
 
@@ -308,12 +316,14 @@ static WifiState_t Wifi_StateTransition(WifiActRes_t Res, const WifiCtrl_t *Ctrl
         // 无候选走到这里就是改密码了
         if (Ctrl->HasCandidate)
         {
+            ESP_LOGW(TAG, "cred fail -> drop candidate (reason=%u)", (unsigned)Ctrl->LastDiscReason);
             Wifi_ClearCandidate();
             esp_event_post(MYWIFI_EVENTS, MYWIFI_EVENT_CANDIDATE_INVALID, NULL, 0, pdMS_TO_TICKS(10));
         }
         else
         {
             // 凭据失效，通过此方式标记凭据无效
+            ESP_LOGW(TAG, "cred fail -> mark NVS cred expired (reason=%u)", (unsigned)Ctrl->LastDiscReason);
             s_HasNvsCred = 0;
             // nvs凭据过期也走失能，因为没有比nvs数据更权威的了，没有其他可以尝试的选项
             esp_event_post(MYWIFI_EVENTS, MYWIFI_EVENT_NVS_CRED_EXPIRED, NULL, 0, pdMS_TO_TICKS(10));
@@ -334,6 +344,8 @@ static WifiState_t Wifi_StateTransition(WifiActRes_t Res, const WifiCtrl_t *Ctrl
             {
                 s_NvsCred = used;
                 s_HasNvsCred = 1;                 /* 镜像同步 */
+                ESP_LOGI(TAG, "commit ok: ssid=%.*s len=%u",
+                         (int)used.SSID_len, used.SSID, (unsigned)used.SSID_len);
                 if (err != ESP_OK)
                 {
                     ESP_LOGW(TAG, "commit half-done: %s", esp_err_to_name(err));
@@ -363,6 +375,14 @@ static void Wifi_Run(uint32_t Kind, const WifiCtrl_t *Ctrl)
     WifiActRes_t Res = Wifi_SmAct(Kind, Ctrl);
 
     WifiState_t State = Wifi_StateTransition(Res, Ctrl);
+
+    /* 状态转移日志：只在真正变化时打（幂等唤醒不刷屏） */
+    if (State != Ctrl->State)
+    {
+        ESP_LOGI(TAG, "state: %d -> %d (res=%d kind=%u cand=%u reason=%u)",
+                 (int)Ctrl->State, (int)State, (int)Res, (unsigned)Kind,
+                 (unsigned)Ctrl->HasCandidate, (unsigned)Ctrl->LastDiscReason);
+    }
 
     /* 跨入失能：停止连接活动（幂等；未连接时无操作、无事件）——必须在临界区外 */
     if (State == WIFI_ST_DISABLE && Ctrl->State != WIFI_ST_DISABLE)
@@ -440,6 +460,8 @@ static void Wifi_EventHandler(void* event_handler_arg,
         }
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        const ip_event_got_ip_t *e = event_data;
+        ESP_LOGI(TAG, "got ip: " IPSTR, IP2STR(&e->ip_info.ip));
         if (s_TaskHandle)
         {
             /* ③ 无脑转译成 kind（不判状态、不碰驱动） */
@@ -477,9 +499,13 @@ void Wifi_Init(void)
                                                         NULL,
                                                         &s_IpEvtInst));
 
+    /* 初始化用的空配置：此时还没有凭据，threshold 只是占位。
+       真正的安全策略随凭据在 ENABLE_CONNECT 里设定（空口令=开放网 → OPEN，否则 WPA2）。
+       若此处写死 WPA2，驱动每次启动都会报误导性告警：
+       "Password length is zero, but authmode threshold is 3, making it impossible to connect to an AP with authmode OPEN" */
     wifi_config_t wifi_config = {
         .sta = {
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .threshold.authmode = WIFI_AUTH_OPEN,
             .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
             // H2E加密所需的密码标识符，一般不用
             .sae_h2e_identifier = "",
