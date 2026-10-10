@@ -1,0 +1,7 @@
+## IDF Component Manager Manifest File
+## Feed 通过 Client.h 用 cJSON（契约头里带了 cJSON.h）→ 这里显式声明托管组件，
+## 组件管理器会自动把它加进本组件的依赖（和 Network 组件同一套做法）。
+dependencies:
+  idf:
+    version: '>=4.1.0'
+  espressif/cjson: ^1.7.19

@@ -15,12 +15,19 @@
 #include "freertos/queue.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include <sys/_intsup.h>
 
 /* ---------- 上限（编译期常量，§11.8） ---------- */
 #define MB_TOPIC_MAX      36      /* "catfeeder/<6hex>/status" = 23，留余量 */
 #define MB_PAYLOAD_MAX   256      /* 协议载荷上限（§十 Q4） */
 #define MB_EVT_Q_LEN      20      /* 事件信箱：≥ 启动全量重推 burst 16 + 控制余量 */
 #define MB_REQ_Q_LEN      16      /* 请求信箱：8~16（§11.8.1） */
+#define MQTT_TOPIC_CMD          "cmd"
+#define MQTT_TOPIC_CMD_LEN      sizeof(MQTT_TOPIC_CMD)
+#define MQTT_TOPIC_STATUS       "status"
+#define MQTT_TOPIC_STATUS_LEN   sizeof(MQTT_TOPIC_STATUS)
+#define MQTT_TOPIC_EVT          "evt"
+#define MQTT_TOPIC_EVT_Len      sizeof(MQTT_TOPIC_EVT)
 
 /* ---------- 事件条目（后端 → client，§11.8.2） ----------
  * 事件 id 与错误结构**直接透传库的类型**（同 ESPHome `MQTTBackendESP32::Event`）：
@@ -36,6 +43,7 @@ typedef struct {
     esp_mqtt_event_id_t     Id;             /* = e->event_id，原样透传 */
     int                     MsgId;          /* SUBSCRIBED / PUBLISHED 对号 */
     const char*             Topic;
+    int                     TopicLen;
     int                     SessionPresent; /* CONNECTED */
     bool                    Retain;
     bool                    Dup;
@@ -75,14 +83,23 @@ typedef struct {
     bool        UseTls;         /* v1 false，字段留位 */
 } MbConfig_t;
 
+/* ---------- 事件处理回调（下行 DATA 已由后端按主题过滤） ----------
+ * · **主题过滤在后端打包点完成**：只放行 client 注册的那条 cmd 主题（含设备 id）。
+ *   主题只起分派作用、本身没有信息 → 既不必装进条目（省 40 B/条），也不传给上层；
+ *   不匹配的报文连一个队列槽都不占。
+ * · 回调跑在 **client 任务**（由 MqttBackend_Loop() 驱动），**不在 esp-mqtt 任务里**。
+ * · MsgId 是库的 packet id（不是信封的 id）；信封 id 在 payload 的 JSON 里。
+ * · 回调里不许阻塞（它挡着 client 的事件流）；Payload 只读。 */
+typedef void(*OnMsgCallback)(int MsgId, char* Payload, int PayloadLen);
+
 /* ---------- 对外 API ---------- */
 
 void MqttBackend_Init(void);                        /* 建两信箱 + 起后端任务（由 NetInit 调用） */
-void MqttBackend_Loop(void);
+void MqttBackend_SetOnMsg(OnMsgCallback OnMsg, const char *CmdTopic);   /* 注册回调 + 下行主题 */
+void MqttBackend_Loop(void);                        /* client 任务每轮调用：取一条事件并分派 */
 void MqttBackend_SetConfig(const MbConfig_t *Cfg);  /* 档 B 配置（§11.8.6） */
 bool MqttBackend_IsConnected(void);                 /* 平台事实镜像（§11.8.2） */
 
-QueueHandle_t MqttBackend_EventQueue(void);         /* client 任务从中取事件（后端创建） */
 bool MqttBackend_PostReq(const MbReq_t *Req);       /* client → 请求信箱；满则 false */
 
 #endif /* __MQTT_BACKEND_H */

@@ -1,0 +1,6 @@
+# Partition table: 16 MB flash -> custom layout (see partitions.csv)
+# NOTE: this must match the choice in sdkconfig. If sdkconfig already exists,
+#       enable "Partition Table -> Custom partition table CSV" in menuconfig once
+#       (or apply the same two lines to sdkconfig).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

@@ -329,11 +329,11 @@ void app_main(void)
 
     Network_Init();
 
-    esp_event_handler_register(TIME_EVENTS, ESP_EVENT_ANY_ID, TS_TestEventHandler, NULL);
+    // esp_event_handler_register(TIME_EVENTS, ESP_EVENT_ANY_ID, TS_TestEventHandler, NULL);
 
-    xTaskCreate(TS_TestPostTask, "TS_TestPostTask", 2048, NULL, 1, NULL);
-    xTaskCreate(TS_StackProbeTask, "TS_StackProbe", 2048, NULL, 1, NULL);
-    xTaskCreate(Display_TestPostTask, "Display_Test", 2048, NULL, 1, NULL);
+    // xTaskCreate(TS_TestPostTask, "TS_TestPostTask", 2048, NULL, 1, NULL);
+    // xTaskCreate(TS_StackProbeTask, "TS_StackProbe", 2048, NULL, 1, NULL);
+    // xTaskCreate(Display_TestPostTask, "Display_Test", 2048, NULL, 1, NULL);
     xTaskCreate(Key_MotorSwitchTask, "Key_MotorSwitch", 2048, NULL, 1, NULL);
     xTaskCreate(Key_DebugModeSwitchTask, "Key_DebugModeSwitchTask", 2048, NULL, 1, NULL);
 }

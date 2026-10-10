@@ -1,8 +1,10 @@
 #include "Feed.h"
+#include "cJSON.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "Motor.h"
 #include "Encoder.h"
+#include "Client.h"
 
 /*
  * 喂食服务实现（对应《模块设计/服务/喂食服务.md》）
@@ -400,6 +402,27 @@ static void Feed_RunTask(void* Parameter)
     }
 }
 
+static int Feed_ParseFeedCmd(const cJSON* D, const char* Ref)
+{
+    const cJSON *g = cJSON_GetObjectItemCaseSensitive(D, "grams");   /* D = 信封里的 d，不是 root */
+    if (!cJSON_IsNumber(g))
+    {
+        return NET_ERR_BAD_PARAMS;
+    }
+    if (g->valueint < 1 || g->valueint > 100)
+    {
+        return NET_ERR_BAD_PARAMS;
+    }
+
+    FdData_t d = { 
+        .Type = FEED_TYPE_IMMEDIATE,
+        .Source = NET_SRC_MQTT,      /* 署名：拒答类只回给下指令的人 */
+        .Weight = (uint8_t)g->valueint 
+    };
+    return (esp_event_post(FEED_EVENTS, FEED_REQUEST, &d, sizeof(d), 0) == ESP_OK)
+           ? 0 : NET_ERR_BUSY;             /* 返回 0 = 受理（client 回 ack）；非 0 = client 回 err */
+}
+
 /* 创建全部队列并注册事件订阅。队列长度=5、按载荷字节数创建（队列存值拷贝）。 */
 void Feed_Init(void)
 {
@@ -408,6 +431,8 @@ void Feed_Init(void)
     s_IRQueue = xQueueCreate(5, sizeof(IR_Data_t));
     assert(s_FdQueue && s_FdReqQueue && s_IRQueue);
     ESP_ERROR_CHECK(esp_event_handler_register(FEED_EVENTS, FEED_REQUEST, Feed_RequestHandler, NULL));
+
+    Net_RegisterDown("feed", Feed_ParseFeedCmd);
 
     xTaskCreate(Feed_RunTask, "Feed_RunTask", 8192, NULL, 1, NULL);
 }

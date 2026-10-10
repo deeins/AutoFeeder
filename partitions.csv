@@ -1,0 +1,22 @@
+# 猫粮投喂器分区表（16 MB flash）—— 2026-10-06 定
+#
+# 布局：bootloader(0x0) → 分区表(0x8000) → nvs(0x9000) → otadata → phy_init
+#       → ota_0 / ota_1 → storage
+#
+# 要点：
+#   · nvs 保持 0x9000 / 0x6000 **不变** → 换表后刷机，原有 WiFi 凭据 / netcfg
+#     / 预约持久化都还在，**不必 erase-flash**
+#   · 双 OTA：ota_0 / ota_1 各 4 MB（当前固件 <1 MB → 余量 ~76%），
+#     装墙上/柜子里的设备可空中升级；配合 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+#     还能"新固件启动失败自动回滚"
+#   · storage：预留 1 MB 数据分区（将来日志 / 事件索引 / 配置；**暂未挂载**）
+#     大块数据放这里，不要塞 NVS
+#   · 合计 ~9.1 MB / 16 MB，其余留白（以后想放大 app slot 也有余地）
+#
+# Name,     Type, SubType, Offset,    Size,    Flags
+nvs,        data, nvs,     0x9000,    0x6000,
+otadata,    data, ota,     0xF000,    0x2000,
+phy_init,   data, phy,     0x11000,   0x1000,
+ota_0,      app,  ota_0,   0x20000,   4M,
+ota_1,      app,  ota_1,   0x420000,  4M,
+storage,    data, spiffs,  0x820000,  1M,

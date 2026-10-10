@@ -1,9 +1,11 @@
 #include "Client.h"
 #include "MqttBackend.h"
 
+#include "cJSON.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -162,94 +164,83 @@ static void Client_SubHeal(void)
      *   → 重投 MB_REQ_SUB（幂等），并刷新 s_LastSubPostUs */
 }
 
+/* 按指令名分派：**调用所有匹配的回调**（同名可注册多条，为将来多消费者留的）。
+ * ⚠️ D = 信封里的 `d` 子对象、Ref = 信封的 `id`，由调用方解析好传进来；
+ *    D 在回调返回后即被 cJSON_Delete 释放 → 回调必须当场取值，不能存指针。 */
+static void Client_MatchCmd(const char *Cmd, const cJSON *D, const char *Ref)
+{
+    int     Err     = 0;
+    uint8_t Matched = 0;
+
+    for (uint8_t i = 0; i < s_DownCount; i++)
+    {
+        if (strcmp(Cmd, s_Down[i].Cmd) == 0)
+        {
+            Matched++;
+            int e = s_Down[i].Fn(D, Ref);
+            if (e != 0 && Err == 0)
+            {
+                Err = e;            /* 多回调时取第一个非 0 作为协议层错误码 */
+            }
+        }
+    }
+
+    if (Matched == 0)
+    {
+        Err = NET_ERR_UNKNOWN_CMD;      /* 1004：t 不在下行注册表里 */
+    }
+
+    /* TODO-C1 §11.5：Err != 0 → 组 err{code,msg,ref}；Err == 0 → 组 ack{ref}
+     * （改型指令受理即回；status_get 以 status 应答代替 ack，见 §四），
+     * 都入 TX 缓存，交给本轮末尾 Client_FlushTx() 发出。 */
+    ESP_LOGI(TAG, "cmd '%s': matched=%u err=%d", Cmd, (unsigned)Matched, Err);
+}
+
+/* 下行 DATA 入口（由 MqttBackend_Loop() 在 **client 任务**里调用）。
+ * · 主题已在后端打包点过滤（只放行 catfeeder/{dev}/cmd）→ 这里**不再判 topic**
+ * · 上行类型（ack/err/…）不会出现在下行 cmd 主题上 → 也不判
+ * · payload 已在打包点 NUL 结尾；长度用 PayloadLen（不依赖 strlen）*/
+static void Client_OnMsg(int MsgId, char* Payload, int PayloadLen)
+{
+    cJSON *Root = cJSON_ParseWithLength(Payload, (size_t)PayloadLen);
+    if (Root == NULL)
+    {
+        ESP_LOGW(TAG, "parse fail (msg_id=%d, len=%d)", MsgId, PayloadLen);
+        /* TODO-C4 §11.3：回 err 1001（解析不出 id 时 ref 留空）*/
+        return;
+    }
+
+    const cJSON *T  = cJSON_GetObjectItemCaseSensitive(Root, "t");
+    const cJSON *D  = cJSON_GetObjectItemCaseSensitive(Root, "d");      /* ← 给回调的是 d */
+    const cJSON *Id = cJSON_GetObjectItemCaseSensitive(Root, "id");     /* ← ref 的来源 */
+
+    /* TODO-C4 §11.3：① 校验 v / id / t（1002/1003）② 幂等环查 id（命中只重发 ack/status）*/
+    if (cJSON_IsString(T))
+    {
+        Client_MatchCmd(T->valuestring, D, cJSON_IsString(Id) ? Id->valuestring : "");
+    }
+    else
+    {
+        ESP_LOGW(TAG, "no 't' in payload");
+        /* TODO-C4：回 err 1002 */
+    }
+
+    cJSON_Delete(Root);
+}
+
 /* ================= client 任务（§11.8.5） ================= */
 
 static void Client_Task(void *arg)
 {
-    QueueHandle_t evtQ = MqttBackend_EventQueue();
-    MbEvent_t     evt;
-
-    (void)arg;
-    if (evtQ == NULL) {
-        ESP_LOGE(TAG, "event mailbox is NULL (MqttBackend_Init 未调用?)");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    for (;;) {
-        /* ① 一次一条；队列有货时下一次 receive 立即返回，故不插 vTaskDelay（§11.8.5） */
-        if (xQueueReceive(evtQ, &evt, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-
-        switch (evt.Id) {
-        case MQTT_EVENT_CONNECTED:
-            /* TODO-C2 §11.8.5①：订阅表全部置 false → 逐条投 MB_REQ_SUB
-             *   → 发 retained status/online → 发 boot（一次性，§八）
-             *   顺序不可颠倒：先重订阅再报 online（§十 Q3）
-             *   ⚠️ 待定：online 是"投出 SUB 后立刻发"还是"等 SUBACK 置位后再发"（见 §十二） */
-            break;
-
-        case MQTT_EVENT_SUBSCRIBED:
-            /* TODO-C3 §11.8.4：evt.Err.error_type != MQTT_ERROR_TYPE_SUBSCRIBE_FAILED
-             *   → s_Subs[0].Subscribed = true；否则告警且保持 false（授予码 ≥ 0x80 = 被 ACL 拒绝）。
-             *   库在 deliver_suback 里先清 NONE（mqtt_client.c:1418）再按需置失败码（:1424），
-             *   故这里读 error_type 不会拿到上一条事件的陈旧值——不需要额外派生字段。
-             *   对号用 evt.MsgId（SUBACK 不含 topic）。 */
-            break;
-
-        case MQTT_EVENT_DATA:
-            /* TODO-C4 §11.3 RX 处理链：
-             *   ① 解信封（v/id/t/d/ts）—— 载荷已在打包点 NUL 结尾，有效长度看 evt.Len
-             *   ② 校验：1001 解析 / 1002 缺字段或 id 超长 / 1003 版本 / 1004 未知指令 / 1005 参数
-             *   ③ 幂等环查 id：命中 → 不重做（改型指令重发 ack；status_get 重发 status）
-             *   ④ 未命中 → 按 t 查 s_Down[] → 调 Fn(JSON_GetObjectItem(D), Ref)
-             *      → 回调内自行 post 内部事件（Source = NET_SRC_MQTT）
-             *      → 返回非 0 则以信封回 err；返回 0 且是改型指令 → 回 ack（同轮发出）
-             *   ⑤ 处理完把 id 写入幂等环 */
-            break;
-
-        case MQTT_EVENT_DISCONNECTED:
-            /* TODO-C5 §11.8.4：订阅表全部置 false；状态机回 NET_ST_DISCONNECTED */
-            break;
-
-        case MQTT_EVENT_PUBLISHED:
-            /* TODO-C6 §11.8.7：v1 只作日志（evt.MsgId），不做在途表 */
-            break;
-
-        case MQTT_EVENT_ERROR:
-            /* TODO-C7 §11.8.2：诊断日志 + 告警（错误字段走透传的库结构）
-             *   evt.Err.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED → evt.Err.connect_return_code
-             *   evt.Err.error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT
-             *       → evt.Err.esp_tls_last_esp_err / evt.Err.esp_transport_sock_errno */
-            break;
-
-        default:
-            /* 纯转发的代价：后端不再筛事件，"我们只处理这 6 种"这件事落在这一处。
-             * BEFORE_CONNECT / UNSUBSCRIBED / DELETED / USER 会走到这里 → 降 DEBUG，不刷屏。 */
-            ESP_LOGD(TAG, "unhandled mqtt event id=%d", (int)evt.Id);
-            break;
-        }
+    for (;;)
+    {
+        MqttBackend_Loop();
 
         /* ② 每轮末尾 flush 上行：保证本条指令的 ack 同轮发出（"同帧处理上下行"） */
         Client_FlushTx();
 
         /* ③ 订阅自愈兜底（§11.8.4） */
         Client_SubHeal();
-
-        /* TODO-F1 ⚠️ 缺口（§十二 #10）：本循环 portMAX_DELAY 且不订阅 WiFi 事件
-         *   → 「WiFi 已连上（GOT_IP）」进不来，§九 的「失能 → 未连接」没有触发通路。
-         *   候选：a) 订阅 MYWIFI_EVENTS（需 include Wifi.h）把 GOT_IP 翻成一条事件信箱条目
-         *         b) 接收改带超时 + 每轮读 Wifi_IsConnected()
-         *         c) 加一个把 WiFi 事实投进事件信箱的 ESP_EVENT 桥
-         *
-         * TODO-C8 ⚠️ 缺口（§十二 #12）：状态机推进点缺位。
-         *   §九 需要 5s 退避 / 20s DNS / 60s 连接 三个计时，但本循环只处理队列事件，
-         *   §11.8.1 也没给 client 配计时源。候选：
-         *     a) 每状态进入时 esp_timer_start_once（到点投一条内部事件进事件信箱）
-         *     b) 本 receive 改带超时（如 500ms）→ 每轮做一次 Client_Tick()（= 状态机推进）
-         *     c) FreeRTOS 软件定时器
-         *   注：F1 与 C8 同源，若都选 b 可合并成"带超时接收 + 每轮 tick"。 */
     }
 }
 
@@ -277,6 +268,9 @@ void Client_Init(void)
      *   → MqttBackend_SetConfig(...)；开发期用"编译期默认 + NVS 镜像注入"替代配网
      *   （《WiFi模块自测清单-临时文件.md》附 A）。
      *   缺配置 → 保持失能 + 一条日志，不进连接状态机。 */
+
+    /* 注册下行回调 + 下行唯一主题（含设备 id）→ 后端据此过滤，不匹配的不占队列槽 */
+    MqttBackend_SetOnMsg(Client_OnMsg, s_TopicCmd);
 
     if (xTaskCreate(Client_Task, "mqtt_client", NET_TASK_STACK, NULL, NET_TASK_PRIO, NULL) != pdPASS) {
         ESP_LOGE(TAG, "client task create failed");
